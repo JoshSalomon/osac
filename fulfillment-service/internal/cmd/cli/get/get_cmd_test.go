@@ -14,6 +14,7 @@ language governing permissions and limitations under the License.
 package get
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -133,13 +134,17 @@ var _ = Describe("Get command", func() {
 	})
 
 	Describe("render with no matching objects", func() {
-		var console *terminal.Console
+		var (
+			console *terminal.Console
+			stdout  *bytes.Buffer
+		)
 
 		BeforeEach(func() {
 			var err error
+			stdout = &bytes.Buffer{}
 			console, err = terminal.NewConsole().
 				SetLogger(logger).
-				SetStdout(GinkgoWriter).
+				SetStdout(stdout).
 				SetStderr(GinkgoWriter).
 				Build()
 			Expect(err).ToNot(HaveOccurred())
@@ -169,6 +174,7 @@ var _ = Describe("Get command", func() {
 			var exitErr exit.Error
 			Expect(errors.As(err, &exitErr)).To(BeTrue())
 			Expect(exitErr.Code()).To(Equal(1))
+			Expect(stdout.String()).To(MatchJSON("[]"))
 		})
 
 		It("renderYaml returns exit.Error when no objects match", func() {
@@ -181,6 +187,7 @@ var _ = Describe("Get command", func() {
 			var exitErr exit.Error
 			Expect(errors.As(err, &exitErr)).To(BeTrue())
 			Expect(exitErr.Code()).To(Equal(1))
+			Expect(stdout.String()).To(MatchYAML("[]"))
 		})
 	})
 })

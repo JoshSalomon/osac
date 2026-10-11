@@ -7,7 +7,7 @@ require (
 	buf.build/go/protovalidate v1.2.0
 	charm.land/glamour/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/IBM/sarama v1.60.2
+	github.com/IBM/sarama v1.61.1
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/cenkalti/backoff/v4 v4.3.0

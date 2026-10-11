@@ -263,12 +263,28 @@ aap:
     instance:
       enabled: true
       name: "osac-aap"
+      api:
+        resourceRequirements:
+          requests:
+            cpu: 50m
+            memory: 750Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
       controller:
         disabled: false
       hub:
         disabled: true
       lightspeed:
         disabled: true
+      proxy:
+        resourceRequirements:
+          requests:
+            cpu: 50m
+            memory: 750Mi
+          limits:
+            cpu: 256m
+            memory: 1Gi
       noLog: true
       redisMode: standalone
       routeTlsTerminationMechanism: Edge

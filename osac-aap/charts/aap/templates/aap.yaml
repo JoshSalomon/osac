@@ -22,6 +22,7 @@ spec:
   image_pull_policy: {{ .Values.aap.instance.imagePullPolicy }}
   no_log: true
   proxy:
+    concurrency: {{ .Values.aap.instance.proxy.concurrency }}
     resource_requirements:
       {{- toYaml .Values.aap.instance.proxy.resourceRequirements | nindent 6 }}
   redis_mode: {{ .Values.aap.instance.redisMode }}

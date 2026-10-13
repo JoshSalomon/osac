@@ -1081,7 +1081,7 @@
                       "$ref": "#/$defs/aapResourceRequirements",
                       "default": {
                         "requests": {"cpu": "50m", "memory": "750Mi"},
-                        "limits": {"cpu": "500m", "memory": "1Gi"}
+                        "limits": {"cpu": "1", "memory": "1Gi"}
                       }
                     }
                   },
@@ -1124,6 +1124,12 @@
                   "type": "object",
                   "description": "Platform gateway proxy container configuration",
                   "properties": {
+                    "concurrency": {
+                      "type": "integer",
+                      "description": "Number of Envoy proxy worker threads",
+                      "minimum": 1,
+                      "default": 1
+                    },
                     "resourceRequirements": {
                       "$ref": "#/$defs/aapResourceRequirements",
                       "default": {

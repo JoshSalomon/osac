@@ -9,6 +9,22 @@
       - "{{ agent_instance_type_label }}={{ manage_agents_instance_type }}"
   register: manage_agents_allocated
 
+- name: Set worker role on allocated agents without one
+  kubernetes.core.k8s_json_patch:
+    api_version: agent-install.openshift.io/v1beta1
+    kind: Agent
+    name: "{{ agent.metadata.name }}"
+    namespace: "{{ agent.metadata.namespace }}"
+    patch:
+      - op: add
+        path: /spec/role
+        value: "worker"
+  loop: "{{ manage_agents_allocated.resources }}"
+  loop_control:
+    loop_var: agent
+    label: "Set worker role on agent {{ agent.metadata.name }}"
+  when: (agent.spec.role | default('', true)) == ''
+
 - name: Add agents to the cluster
   when: (manage_agents_desired_count | int) > (manage_agents_allocated.resources | length)
   block:

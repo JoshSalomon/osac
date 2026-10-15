@@ -135,7 +135,7 @@ FROM registry.access.redhat.com/ubi9/ubi-minimal:9.5 AS production
 ARG VERSION=dev
 LABEL name="cloud-extensions/osac-ui-rhel10"
 LABEL cpe="cpe:/a:redhat:cloud_extensions:0.1::el10"
-LABEL version="${VERSION}"
+LABEL org.opencontainers.image.version="${VERSION}"
 WORKDIR /app
 
 ENV PORT=8080

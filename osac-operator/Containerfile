@@ -46,7 +46,7 @@ FROM registry.access.redhat.com/ubi10-minimal:10.2-1790075626
 ARG VERSION=dev
 LABEL name="cloud-extensions/osac-operator-rhel10"
 LABEL cpe="cpe:/a:redhat:cloud_extensions:0.1::el10"
-LABEL version="${VERSION}"
+LABEL org.opencontainers.image.version="${VERSION}"
 COPY --from=builder /opt/app-root/src/osac-operator/manager /usr/local/bin/
 COPY --from=builder /opt/app-root/src/osac-operator/console-proxy /usr/local/bin/
 COPY --from=builder /opt/app-root/src/osac-operator/trust-admission /usr/local/bin/

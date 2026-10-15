@@ -55,7 +55,7 @@ FROM registry.access.redhat.com/ubi10-minimal:10.2-1790075626
 ARG VERSION=dev
 LABEL name="cloud-extensions/metering-service-rhel10"
 LABEL cpe="cpe:/a:redhat:cloud_extensions:0.1::el10"
-LABEL version="${VERSION}"
+LABEL org.opencontainers.image.version="${VERSION}"
 WORKDIR /
 COPY --from=builder /opt/app-root/src/bin/metering-service .
 USER 65532:65532

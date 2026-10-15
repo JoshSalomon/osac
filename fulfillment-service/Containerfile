@@ -85,4 +85,4 @@ FROM runtime-base AS runtime
 ARG VERSION=dev
 LABEL name="cloud-extensions/fulfillment-service-rhel10"
 LABEL cpe="cpe:/a:redhat:cloud_extensions:0.1::el10"
-LABEL version="${VERSION}"
+LABEL org.opencontainers.image.version="${VERSION}"

@@ -419,6 +419,25 @@ jobs:
           ["osac-ui"]="osac-ui/charts/ui"
         )
 
+        # Every Containerfile that accepts an ARG VERSION, stamped to the
+        # real final version below so the resulting image's `version`
+        # OCI label (see each Containerfile's own comment on this) reports
+        # the real release version instead of its committed dev default --
+        # and so Konflux's release-side {{ oci_version }} tag templating
+        # (see cloud-extensions-stage.yaml's RPA mapping) resolves to it.
+        # osac-aap has no entry: it builds via ansible-builder from
+        # execution-environment.yaml, not a Containerfile, and isn't part
+        # of Konflux's image pipeline yet (see hermetic-release-pipeline
+        # memory/doc) -- nothing to stamp or tag for it here.
+        declare -A COMPONENT_CONTAINERFILES=(
+          ["osac-operator"]="osac-operator/Containerfile"
+          ["fulfillment-service"]="fulfillment-service/Containerfile"
+          ["bare-metal-fulfillment-operator"]="bare-metal-fulfillment-operator/Containerfile"
+          ["osac-metering"]="osac-metering/metering-service/Containerfile osac-metering/adapters/Containerfile.m360-adapter osac-metering/adapters/Containerfile.echo-adapter"
+          ["osac-csi-driver"]="osac-csi-driver/Containerfile"
+          ["osac-ui"]="osac-ui/Containerfile"
+        )
+
         for COMPONENT in $(printf '%s\n' "${!SUB_CHARTS[@]}" | sort); do
           SUB_VERSION=$(jq -r --arg k "${COMPONENT}" '.[$k] // empty' <<<"${COMPONENT_VERSIONS}")
           if [[ -z "${SUB_VERSION}" ]]; then
@@ -435,6 +454,13 @@ jobs:
               SUB_VERSION="${SUB_VERSION}" yq -i '.version = strenv(SUB_VERSION)' "${CHART_DIR}/Chart.yaml"
               SUB_VERSION="${SUB_VERSION}" yq -i '.appVersion = strenv(SUB_VERSION)' "${CHART_DIR}/Chart.yaml"
             done
+            if [[ -n "${COMPONENT_CONTAINERFILES[${COMPONENT}]+set}" ]]; then
+              echo "Stamping ${COMPONENT} Containerfile(s) ARG VERSION to ${SUB_VERSION}..."
+              # Intentional word splitting: some entries list multiple Containerfiles.
+              for CONTAINERFILE in ${COMPONENT_CONTAINERFILES[$COMPONENT]}; do
+                sed -i "s/^ARG VERSION=.*/ARG VERSION=${SUB_VERSION}/" "${CONTAINERFILE}"
+              done
+            fi
             stamp_component_image_refs "${COMPONENT}" "${UMBRELLA_VALUES}" "${PROVISIONAL_TAG}"
           else
             echo "Pinning ${COMPONENT} to already-published ${SUB_VERSION} — no local chart stamping, no build"

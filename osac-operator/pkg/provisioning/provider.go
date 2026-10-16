@@ -93,6 +93,13 @@ type ProvisioningProviderWithProvisionOutputs interface {
 	GetProvisionStatusWithExtraVars(ctx context.Context, resource client.Object, jobID string) (ProvisionStatusWithExtraVars, error)
 }
 
+// ProvisioningJobCanceler can cancel a running provisioning job during resource deletion.
+// Providers that cannot cancel jobs may omit this interface; callers must then wait for the
+// job to reach a terminal state before continuing deletion.
+type ProvisioningJobCanceler interface {
+	CancelJob(ctx context.Context, jobID string) error
+}
+
 // ProvisionStatus represents the current state of a provisioning or deprovisioning job.
 type ProvisionStatus struct {
 	// JobID is the unique identifier for this job.
@@ -121,6 +128,10 @@ type ProvisionStatus struct {
 
 	// ErrorDetails contains detailed error information when State is JobStateFailed.
 	ErrorDetails string
+
+	// Outputs contains structured artifacts returned by the provisioning job.
+	// Provider-specific controllers use these values to populate backend identifiers.
+	Outputs map[string]any
 }
 
 // ProvisionStatusWithExtraVars contains the provisioning status and returned output variables.

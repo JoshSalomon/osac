@@ -170,11 +170,21 @@ var _ = Describe("ComputeInstance with Subnet attachment", func() {
 				Metadata:      privatev1.Metadata_builder{Name: ncName}.Build(),
 				Title:         "Test CUDN Network Class",
 				FabricManager: new("netris"),
+				K8SManager:    new(testVMK8SManagerName),
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		networkClassId = ncResp.GetObject().GetId()
 		waitForNetworkClassReady(ctx, networkClassesClient, networkClassId)
+		setNetworkClassCanonicalHub(ctx, networkClassesClient, networkClassId, hubId)
+		expectNetworkClassStatus(
+			ctx,
+			networkClassesClient,
+			networkClassId,
+			privatev1.NetworkClassState_NETWORK_CLASS_STATE_READY,
+			hubId,
+			"",
+		)
 
 		// Create VirtualNetwork
 		virtualNetworkId = fmt.Sprintf("test-vnet-%s", uuid.New())
@@ -297,10 +307,14 @@ var _ = Describe("ComputeInstance with Subnet attachment", func() {
 
 	It("rejects ComputeInstance without attachments when the tenant has no default subnet", func() {
 		computeInstanceId = fmt.Sprintf("test-ci-%s", uuid.New())
+		project := createCatalogItemProjectFixture(ctx, usersGroup)
 		_, err := computeInstancesClient.Create(ctx, publicv1.ComputeInstancesCreateRequest_builder{
 			Object: publicv1.ComputeInstance_builder{
-				Metadata: publicv1.Metadata_builder{Name: fmt.Sprintf("test-ci-%s", uuid.New()[24:32])}.Build(),
-				Id:       computeInstanceId,
+				Metadata: publicv1.Metadata_builder{
+					Name:    fmt.Sprintf("test-ci-%s", uuid.New()[24:32]),
+					Project: project,
+				}.Build(),
+				Id: computeInstanceId,
 				Spec: publicv1.ComputeInstanceSpec_builder{
 					Template:     publicv1.ComputeInstanceTemplateReference_builder{Id: computeInstanceTemplateId}.Build(),
 					InstanceType: publicv1.InstanceTypeReference_builder{Name: instanceTypeId}.Build(),

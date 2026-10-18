@@ -466,6 +466,22 @@ path.write_text(policy.replace(anchor, anchor + rule, 1))
 PY
 ```
 
+The copied policy keeps deployment-internal endpoints as reserved `.example`
+placeholder hosts (the `gitlab`, `jira`, and `rh_pattern_server` rules).
+Substitute them with the deployment's real endpoints — or remove rules you
+do not need — before creating the sandbox:
+
+```bash
+sed -i \
+  -e 's/gitlab\.internal\.example/<internal-gitlab-host>/' \
+  -e 's/jira\.internal\.example/<internal-jira-host>/' \
+  -e 's/patterns\.internal\.example/<internal-pattern-server-host>/' \
+  "$STATE_DIR/policy-kind.yaml"
+```
+
+Keep the substituted policy outside the repository and never commit it: it
+contains the deployment's internal endpoints.
+
 Review `$STATE_DIR/policy-kind.yaml` before creating the sandbox. The `tls:
 skip` policy setting delegates certificate verification to `kubectl` and its
 scoped kubeconfig; do not disable verification in the kubeconfig.

@@ -21,17 +21,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
-	"github.com/osac-project/osac/fulfillment-service/internal/events"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 type PrivateSecurityGroupsServerBuilder struct {
 	logger            *slog.Logger
-	notifier          events.Notifier
 	attributionLogic  auth.AttributionLogic
 	tenancyLogic      auth.TenancyLogic
 	metricsRegisterer prometheus.Registerer
@@ -44,6 +43,7 @@ type PrivateSecurityGroupsServer struct {
 	privatev1.UnimplementedSecurityGroupsServer
 
 	logger            *slog.Logger
+	tenancyLogic      auth.TenancyLogic
 	generic           *GenericServer[*privatev1.SecurityGroup]
 	virtualNetworkDao *dao.GenericDAO[*privatev1.VirtualNetwork]
 }
@@ -54,11 +54,6 @@ func NewPrivateSecurityGroupsServer() *PrivateSecurityGroupsServerBuilder {
 
 func (b *PrivateSecurityGroupsServerBuilder) SetLogger(value *slog.Logger) *PrivateSecurityGroupsServerBuilder {
 	b.logger = value
-	return b
-}
-
-func (b *PrivateSecurityGroupsServerBuilder) SetNotifier(value events.Notifier) *PrivateSecurityGroupsServerBuilder {
-	b.notifier = value
 	return b
 }
 
@@ -115,7 +110,6 @@ func (b *PrivateSecurityGroupsServerBuilder) Build() (result *PrivateSecurityGro
 	generic, err := NewGenericServer[*privatev1.SecurityGroup]().
 		SetLogger(b.logger).
 		SetService(privatev1.SecurityGroups_ServiceDesc.ServiceName).
-		SetNotifier(b.notifier).
 		SetAttributionLogic(b.attributionLogic).
 		SetTenancyLogic(b.tenancyLogic).
 		SetMetricsRegisterer(b.metricsRegisterer).
@@ -128,6 +122,7 @@ func (b *PrivateSecurityGroupsServerBuilder) Build() (result *PrivateSecurityGro
 	// Create and populate the object:
 	result = &PrivateSecurityGroupsServer{
 		logger:            b.logger,
+		tenancyLogic:      b.tenancyLogic,
 		generic:           generic,
 		virtualNetworkDao: virtualNetworkDao,
 	}
@@ -171,31 +166,19 @@ func (s *PrivateSecurityGroupsServer) Create(ctx context.Context,
 
 func (s *PrivateSecurityGroupsServer) Update(ctx context.Context,
 	request *privatev1.SecurityGroupsUpdateRequest) (response *privatev1.SecurityGroupsUpdateResponse, err error) {
-	// Get existing object for immutability validation:
-	id := request.GetObject().GetId()
-	if id == "" {
+	if request.GetObject().GetId() == "" {
 		err = grpcstatus.Errorf(grpccodes.InvalidArgument, "object identifier is mandatory")
 		return
 	}
-
-	getRequest := &privatev1.SecurityGroupsGetRequest{}
-	getRequest.SetId(id)
-	var getResponse *privatev1.SecurityGroupsGetResponse
-	err = s.generic.Get(ctx, getRequest, &getResponse)
-	if err != nil {
-		return
-	}
-
-	existingSecurityGroup := getResponse.GetObject()
-
-	// Validate with existing object context:
-	err = s.validateSecurityGroup(ctx, request.GetObject(), existingSecurityGroup)
-	if err != nil {
-		return
-	}
-
-	err = s.generic.Update(ctx, request, &response)
+	err = s.generic.UpdateWithValidation(ctx, request, &response, s.validateSecurityGroup)
 	return
+}
+
+func (s *PrivateSecurityGroupsServer) updateFromPublic(ctx context.Context,
+	request *privatev1.SecurityGroupsUpdateRequest) (*privatev1.SecurityGroupsUpdateResponse, error) {
+	var response *privatev1.SecurityGroupsUpdateResponse
+	err := s.generic.UpdateWithValidation(ctx, request, &response, s.validateSecurityGroupWithRuleUpdates)
+	return response, err
 }
 
 func (s *PrivateSecurityGroupsServer) Delete(ctx context.Context,
@@ -207,7 +190,7 @@ func (s *PrivateSecurityGroupsServer) Delete(ctx context.Context,
 	if err != nil {
 		return
 	}
-	if err = validateNotDefault(getResponse.GetObject().GetMetadata().GetLabels(), "security group"); err != nil {
+	if err = validateNotDefault(ctx, getResponse.GetObject().GetMetadata().GetLabels(), "security group"); err != nil {
 		return
 	}
 	err = s.generic.Delete(ctx, request, &response)
@@ -223,9 +206,30 @@ func (s *PrivateSecurityGroupsServer) Signal(ctx context.Context,
 // validateSecurityGroup validates the SecurityGroup object.
 func (s *PrivateSecurityGroupsServer) validateSecurityGroup(ctx context.Context,
 	newSecurityGroup *privatev1.SecurityGroup, existingSecurityGroup *privatev1.SecurityGroup) error {
+	return s.validateSecurityGroupWithRuleUpdatePolicy(ctx, newSecurityGroup, existingSecurityGroup, false)
+}
+
+func (s *PrivateSecurityGroupsServer) validateSecurityGroupWithRuleUpdates(ctx context.Context,
+	newSecurityGroup *privatev1.SecurityGroup, existingSecurityGroup *privatev1.SecurityGroup) error {
+	return s.validateSecurityGroupWithRuleUpdatePolicy(ctx, newSecurityGroup, existingSecurityGroup, true)
+}
+
+func (s *PrivateSecurityGroupsServer) validateSecurityGroupWithRuleUpdatePolicy(ctx context.Context,
+	newSecurityGroup *privatev1.SecurityGroup, existingSecurityGroup *privatev1.SecurityGroup, allowRuleUpdates bool) error {
 
 	if newSecurityGroup == nil {
 		return grpcstatus.Errorf(grpccodes.InvalidArgument, "security group is mandatory")
+	}
+
+	if existingSecurityGroup != nil {
+		if err := validateDefaultLabelUpdate(
+			existingSecurityGroup.GetMetadata().GetLabels(),
+			newSecurityGroup.GetMetadata().GetLabels(),
+			nil,
+			"security group",
+		); err != nil {
+			return err
+		}
 	}
 
 	spec := newSecurityGroup.GetSpec()
@@ -234,14 +238,14 @@ func (s *PrivateSecurityGroupsServer) validateSecurityGroup(ctx context.Context,
 	}
 
 	// Check immutable fields (only on Update)
-	if err := validateImmutableFieldsSecurityGroup(newSecurityGroup, existingSecurityGroup); err != nil {
+	if err := validateImmutableFieldsSecurityGroup(newSecurityGroup, existingSecurityGroup, allowRuleUpdates); err != nil {
 		return err
 	}
 
 	// Validate parent VirtualNetwork
 	// Only validate on Create or if virtual_network changed (though it shouldn't on Update)
 	if existingSecurityGroup == nil || refKey(spec.GetVirtualNetwork()) != refKey(existingSecurityGroup.GetSpec().GetVirtualNetwork()) {
-		if err := s.validateVirtualNetworkReference(ctx, spec); err != nil {
+		if err := s.validateVirtualNetworkReference(ctx, newSecurityGroup); err != nil {
 			return err
 		}
 	}
@@ -256,7 +260,8 @@ func (s *PrivateSecurityGroupsServer) validateSecurityGroup(ctx context.Context,
 
 // validateVirtualNetworkReference validates that the referenced VirtualNetwork exists and is in READY state.
 func (s *PrivateSecurityGroupsServer) validateVirtualNetworkReference(ctx context.Context,
-	spec *privatev1.SecurityGroupSpec) error {
+	securityGroup *privatev1.SecurityGroup) error {
+	spec := securityGroup.GetSpec()
 
 	virtualNetworkRef := spec.GetVirtualNetwork()
 	if virtualNetworkRef == nil {
@@ -281,6 +286,13 @@ func (s *PrivateSecurityGroupsServer) validateVirtualNetworkReference(ctx contex
 	}
 
 	virtualNetwork := getResponse.GetObject()
+	securityGroupTenant, err := resolveObjectTenant(ctx, securityGroup.GetMetadata(), s.tenancyLogic)
+	if err != nil {
+		return err
+	}
+	if err := validateTenantMatch(securityGroupTenant, virtualNetwork, "VirtualNetwork", virtualNetworkKey); err != nil {
+		return err
+	}
 
 	// Check parent VirtualNetwork is READY
 	if virtualNetwork.GetStatus().GetState() != privatev1.VirtualNetworkState_VIRTUAL_NETWORK_STATE_READY {
@@ -354,16 +366,15 @@ func validateSecurityRule(rule *privatev1.SecurityRule, ruleType string, index i
 		}
 	}
 
-	// At least one CIDR must be specified
-	if rule.GetIpv4Cidr() == "" && rule.GetIpv6Cidr() == "" {
+	if rule.GetIpv6Cidr() != "" {
 		return grpcstatus.Errorf(grpccodes.InvalidArgument,
-			"%s rule at index %d: at least one of ipv4_cidr or ipv6_cidr must be provided", ruleType, index)
+			"%s rule at index %d: IPv6 and dual-stack networking are not supported", ruleType, index)
 	}
-
-	if err := canonicalizeDualStackCIDRs(
-		rule.GetIpv4Cidr, rule.SetIpv4Cidr,
-		rule.GetIpv6Cidr, rule.SetIpv6Cidr,
-	); err != nil {
+	if rule.GetIpv4Cidr() == "" {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument,
+			"%s rule at index %d: ipv4_cidr is required and must be a canonical IPv4 CIDR", ruleType, index)
+	}
+	if _, err := parseAndValidateCanonicalCIDR(rule.GetIpv4Cidr(), cidrIPv4); err != nil {
 		return grpcstatus.Errorf(grpccodes.InvalidArgument,
 			"%s rule at index %d: %v", ruleType, index, err)
 	}
@@ -372,7 +383,8 @@ func validateSecurityRule(rule *privatev1.SecurityRule, ruleType string, index i
 }
 
 // validateImmutableFieldsSecurityGroup validates that immutable fields have not been changed.
-func validateImmutableFieldsSecurityGroup(newSecurityGroup *privatev1.SecurityGroup, existingSecurityGroup *privatev1.SecurityGroup) error {
+func validateImmutableFieldsSecurityGroup(newSecurityGroup *privatev1.SecurityGroup,
+	existingSecurityGroup *privatev1.SecurityGroup, allowRuleUpdates bool) error {
 	if existingSecurityGroup == nil {
 		return nil // Create operation, no immutability checks
 	}
@@ -385,6 +397,22 @@ func validateImmutableFieldsSecurityGroup(newSecurityGroup *privatev1.SecurityGr
 		return grpcstatus.Errorf(grpccodes.InvalidArgument,
 			"field 'spec.virtual_network' is immutable and cannot be changed from '%s' to '%s'",
 			refKey(existingSpec.GetVirtualNetwork()), refKey(newSpec.GetVirtualNetwork()))
+	}
+	if allowRuleUpdates {
+		if newSpec != nil {
+			newSpec = proto.Clone(newSpec).(*privatev1.SecurityGroupSpec)
+			newSpec.Ingress = nil
+			newSpec.Egress = nil
+		}
+		if existingSpec != nil {
+			existingSpec = proto.Clone(existingSpec).(*privatev1.SecurityGroupSpec)
+			existingSpec.Ingress = nil
+			existingSpec.Egress = nil
+		}
+	}
+	if !proto.Equal(newSpec, existingSpec) {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument,
+			"field 'spec' is immutable and cannot be changed after creation")
 	}
 
 	return nil

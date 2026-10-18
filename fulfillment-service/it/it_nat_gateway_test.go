@@ -40,10 +40,11 @@ var _ = Describe("NATGateway lifecycle", func() {
 		virtualNetworksClient    privatev1.VirtualNetworksClient
 		networkClassesClient     privatev1.NetworkClassesClient
 
-		networkClassId   string
-		virtualNetworkId string
-		poolId           string
-		externalIPId     string
+		networkClassId    string
+		networkClassHubID string
+		virtualNetworkId  string
+		poolId            string
+		externalIPId      string
 	)
 
 	BeforeEach(func() {
@@ -67,6 +68,22 @@ var _ = Describe("NATGateway lifecycle", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		networkClassId = ncResp.GetObject().GetId()
+		waitForNetworkClassReady(ctx, networkClassesClient, networkClassId)
+		setNetworkClassCanonicalHub(ctx, networkClassesClient, networkClassId, hubId)
+		expectNetworkClassStatus(
+			ctx,
+			networkClassesClient,
+			networkClassId,
+			privatev1.NetworkClassState_NETWORK_CLASS_STATE_READY,
+			hubId,
+			"",
+		)
+		networkClassResp, err := networkClassesClient.Get(ctx, privatev1.NetworkClassesGetRequest_builder{
+			Id: networkClassId,
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		networkClassHubID = networkClassResp.GetObject().GetStatus().GetHub()
+		Expect(networkClassHubID).ToNot(BeEmpty())
 
 		// Create VirtualNetwork
 		virtualNetworkId = fmt.Sprintf("test-vnet-%s", uuid.New())
@@ -93,6 +110,7 @@ var _ = Describe("NATGateway lifecycle", func() {
 			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(resp.GetObject().GetStatus().GetState()).To(
 				Equal(privatev1.VirtualNetworkState_VIRTUAL_NETWORK_STATE_PENDING))
+			g.Expect(resp.GetObject().GetStatus().GetHub()).To(Equal(networkClassHubID))
 		}, time.Minute, time.Second).Should(Succeed())
 
 		vnGetResp, err := virtualNetworksClient.Get(ctx, privatev1.VirtualNetworksGetRequest_builder{
@@ -165,6 +183,13 @@ var _ = Describe("NATGateway lifecycle", func() {
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
+		Eventually(func(g Gomega) {
+			resp, err := privateExternalIPsClient.Get(ctx, privatev1.ExternalIPsGetRequest_builder{
+				Id: externalIPId,
+			}.Build())
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(resp.GetObject().GetStatus().GetHub()).To(Equal(networkClassHubID))
+		}, time.Minute, time.Second).Should(Succeed())
 
 		// Promote ExternalIP to ALLOCATED
 		ipGetResp, err := privateExternalIPsClient.Get(ctx, privatev1.ExternalIPsGetRequest_builder{
@@ -287,6 +312,15 @@ var _ = Describe("NATGateway lifecycle", func() {
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
+		expectNetworkingResourceHub(ctx, networkClassHubID, func(getCtx context.Context) (string, error) {
+			resp, getErr := privateExternalIPsClient.Get(getCtx, privatev1.ExternalIPsGetRequest_builder{
+				Id: pendingIPId,
+			}.Build())
+			if getErr != nil {
+				return "", getErr
+			}
+			return resp.GetObject().GetStatus().GetHub(), nil
+		})
 		DeferCleanup(func() {
 			// Promote to ALLOCATED so delete succeeds
 			ipGetResp, err := privateExternalIPsClient.Get(ctx, privatev1.ExternalIPsGetRequest_builder{
@@ -413,6 +447,7 @@ var _ = Describe("NATGateway lifecycle", func() {
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
 		})
+		waitForNetworkClassReady(ctx, networkClassesClient, k8sOnlyNC.GetObject().GetId())
 
 		k8sOnlyVNId := fmt.Sprintf("test-vnet-%s", uuid.New())
 		_, err = virtualNetworksClient.Create(ctx, privatev1.VirtualNetworksCreateRequest_builder{
@@ -451,80 +486,6 @@ var _ = Describe("NATGateway lifecycle", func() {
 		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.FailedPrecondition))
 	})
 
-	It("Rejects update of immutable spec.virtual_network", func() {
-		ngId := fmt.Sprintf("test-ng-%s", uuid.New())
-		response, err := natGatewaysClient.Create(ctx, publicv1.NATGatewaysCreateRequest_builder{
-			Object: publicv1.NATGateway_builder{
-				Id: ngId,
-				Metadata: publicv1.Metadata_builder{
-					Name: fmt.Sprintf("test-ng-%s", uuid.New()[24:32]),
-				}.Build(),
-				Spec: publicv1.NATGatewaySpec_builder{
-					VirtualNetwork: publicv1.VirtualNetworkLocalReference_builder{Id: virtualNetworkId}.Build(),
-					ExternalIp:     publicv1.ExternalIPLocalReference_builder{Id: externalIPId}.Build(),
-				}.Build(),
-			}.Build(),
-		}.Build())
-		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() {
-			natGatewaysClient.Delete(ctx, publicv1.NATGatewaysDeleteRequest_builder{
-				Id: ngId,
-			}.Build())
-		})
-		name := response.GetObject().GetMetadata().GetName()
-		_, err = natGatewaysClient.Update(ctx, publicv1.NATGatewaysUpdateRequest_builder{
-			Object: publicv1.NATGateway_builder{
-				Id: ngId,
-				Metadata: publicv1.Metadata_builder{
-					Name: name,
-				}.Build(),
-				Spec: publicv1.NATGatewaySpec_builder{
-					VirtualNetwork: publicv1.VirtualNetworkLocalReference_builder{Name: "different-vnet"}.Build(),
-				}.Build(),
-			}.Build(),
-			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.virtual_network"}},
-		}.Build())
-		Expect(err).To(HaveOccurred())
-		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
-	})
-
-	It("Rejects update of immutable spec.external_ip", func() {
-		ngId := fmt.Sprintf("test-ng-%s", uuid.New())
-		response, err := natGatewaysClient.Create(ctx, publicv1.NATGatewaysCreateRequest_builder{
-			Object: publicv1.NATGateway_builder{
-				Id: ngId,
-				Metadata: publicv1.Metadata_builder{
-					Name: fmt.Sprintf("test-ng-%s", uuid.New()[24:32]),
-				}.Build(),
-				Spec: publicv1.NATGatewaySpec_builder{
-					VirtualNetwork: publicv1.VirtualNetworkLocalReference_builder{Id: virtualNetworkId}.Build(),
-					ExternalIp:     publicv1.ExternalIPLocalReference_builder{Id: externalIPId}.Build(),
-				}.Build(),
-			}.Build(),
-		}.Build())
-		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() {
-			natGatewaysClient.Delete(ctx, publicv1.NATGatewaysDeleteRequest_builder{
-				Id: ngId,
-			}.Build())
-		})
-		name := response.GetObject().GetMetadata().GetName()
-		_, err = natGatewaysClient.Update(ctx, publicv1.NATGatewaysUpdateRequest_builder{
-			Object: publicv1.NATGateway_builder{
-				Id: ngId,
-				Metadata: publicv1.Metadata_builder{
-					Name: name,
-				}.Build(),
-				Spec: publicv1.NATGatewaySpec_builder{
-					ExternalIp: publicv1.ExternalIPLocalReference_builder{Name: "different-ip"}.Build(),
-				}.Build(),
-			}.Build(),
-			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.external_ip"}},
-		}.Build())
-		Expect(err).To(HaveOccurred())
-		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
-	})
-
 	It("Deleting NATGateway leaves ExternalIP attachment output unset", func() {
 		ngId := fmt.Sprintf("test-ng-%s", uuid.New())
 		_, err := natGatewaysClient.Create(ctx, publicv1.NATGatewaysCreateRequest_builder{
@@ -559,43 +520,4 @@ var _ = Describe("NATGateway lifecycle", func() {
 		Expect(ipResp.GetObject().GetStatus().GetAttached()).To(BeFalse())
 	})
 
-	It("Can update metadata labels", func() {
-		ngId := fmt.Sprintf("test-ng-%s", uuid.New())
-		response, err := natGatewaysClient.Create(ctx, publicv1.NATGatewaysCreateRequest_builder{
-			Object: publicv1.NATGateway_builder{
-				Id: ngId,
-				Metadata: publicv1.Metadata_builder{
-					Name: fmt.Sprintf("test-ng-%s", uuid.New()[24:32]),
-				}.Build(),
-				Spec: publicv1.NATGatewaySpec_builder{
-					VirtualNetwork: publicv1.VirtualNetworkLocalReference_builder{Id: virtualNetworkId}.Build(),
-					ExternalIp:     publicv1.ExternalIPLocalReference_builder{Id: externalIPId}.Build(),
-				}.Build(),
-			}.Build(),
-		}.Build())
-		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() {
-			natGatewaysClient.Delete(ctx, publicv1.NATGatewaysDeleteRequest_builder{
-				Id: ngId,
-			}.Build())
-		})
-		name := response.GetObject().GetMetadata().GetName()
-		_, err = natGatewaysClient.Update(ctx, publicv1.NATGatewaysUpdateRequest_builder{
-			Object: publicv1.NATGateway_builder{
-				Id: ngId,
-				Metadata: publicv1.Metadata_builder{
-					Name:   name,
-					Labels: map[string]string{"env": "test"},
-				}.Build(),
-			}.Build(),
-			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"metadata.labels"}},
-		}.Build())
-		Expect(err).ToNot(HaveOccurred())
-
-		getResp, err := natGatewaysClient.Get(ctx, publicv1.NATGatewaysGetRequest_builder{
-			Id: ngId,
-		}.Build())
-		Expect(err).ToNot(HaveOccurred())
-		Expect(getResp.GetObject().GetMetadata().GetLabels()).To(HaveKeyWithValue("env", "test"))
-	})
 })

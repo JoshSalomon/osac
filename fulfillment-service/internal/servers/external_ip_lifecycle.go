@@ -29,7 +29,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
-	"github.com/osac-project/osac/fulfillment-service/internal/events"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
@@ -83,39 +82,6 @@ func newExternalIPLifecycle(
 		bareMetalInstanceDao:    bareMetalInstanceDao,
 		virtualNetworkDao:       virtualNetworkDao,
 	}
-}
-
-func addDAOEventCallback[O dao.Object](builder *dao.GenericDAOBuilder[O], notifier events.Notifier) {
-	if notifier != nil {
-		builder.AddEventCallback(makeNotifyCallback[O](notifier))
-	}
-}
-
-func validatePublicUpdateMask(mask *fieldmaskpb.FieldMask) error {
-	if mask == nil || len(mask.GetPaths()) == 0 {
-		return grpcstatus.Error(grpccodes.InvalidArgument, "update_mask must explicitly name metadata or spec fields")
-	}
-	for _, path := range mask.GetPaths() {
-		if path == "status" || strings.HasPrefix(path, "status"+".") {
-			return grpcstatus.Error(grpccodes.InvalidArgument, "status output fields cannot be updated")
-		}
-		if path != "metadata" && path != "spec" && !strings.HasPrefix(path, "metadata"+".") && !strings.HasPrefix(path, "spec"+".") {
-			return grpcstatus.Error(grpccodes.InvalidArgument, "update_mask paths must name metadata or spec fields")
-		}
-	}
-	return nil
-}
-
-func validatePublicMetadataUpdateMask(mask *fieldmaskpb.FieldMask) error {
-	if err := validatePublicUpdateMask(mask); err != nil {
-		return err
-	}
-	for _, path := range mask.GetPaths() {
-		if path != "metadata" && !strings.HasPrefix(path, "metadata"+".") {
-			return grpcstatus.Error(grpccodes.InvalidArgument, "public lifecycle updates may only name metadata fields")
-		}
-	}
-	return nil
 }
 
 func validatePrivateLifecycleUpdateMask(mask *fieldmaskpb.FieldMask, allowedStatusPaths, rejectedStatusPaths []string) error {
@@ -245,17 +211,6 @@ func (l *externalIPLifecycle) lockNewBareMetalAttachmentReferences(ctx context.C
 	return err
 }
 
-func (l *externalIPLifecycle) lockNewNATGatewayReferences(ctx context.Context, externalIPID, virtualNetworkID string) error {
-	if _, err := l.externalIPDao.Get().SetId(externalIPID).SetLock(true).Do(ctx); err != nil {
-		return err
-	}
-	if l.virtualNetworkDao == nil {
-		return errors.New("virtual network DAO is not configured")
-	}
-	_, err := l.virtualNetworkDao.Get().SetId(virtualNetworkID).SetLock(true).Do(ctx)
-	return err
-}
-
 func (l *externalIPLifecycle) lockNATGateway(ctx context.Context, id string) (*privatev1.ExternalIP, *privatev1.NATGateway, error) {
 	initialResponse, err := l.natGatewayDao.Get().SetId(id).Do(ctx)
 	if err != nil {
@@ -361,7 +316,7 @@ func (l *externalIPLifecycle) lockExternalIPConsumers(ctx context.Context, exter
 
 func (l *externalIPLifecycle) ensureExternalIPAvailable(ctx context.Context, externalIPID string) error {
 	filter := fmt.Sprintf(
-		"(this.spec.external_ip.id == %s || this.spec.external_ip.name == %s) && !has(this.metadata.deletion_timestamp)",
+		"(this.spec.external_ip.id == %s || this.spec.external_ip.name == %s)",
 		strconv.Quote(externalIPID), strconv.Quote(externalIPID),
 	)
 	if l.externalIPAttachmentDao != nil {
@@ -524,40 +479,11 @@ func (l *externalIPLifecycle) deleteExternalIP(ctx context.Context, id string) e
 }
 
 func (l *externalIPLifecycle) deleteLockedExternalIP(ctx context.Context, externalIP *privatev1.ExternalIP) error {
-	firstDeletionBoundary := !externalIP.HasMetadata() || !externalIP.GetMetadata().HasDeletionTimestamp()
-	if _, err := l.externalIPDao.Delete().SetId(externalIP.GetId()).Do(ctx); err != nil {
-		return err
-	}
-	if !firstDeletionBoundary {
-		return nil
-	}
-	poolID := refKey(externalIP.GetSpec().GetPool())
-	if poolID == "" {
-		return nil
-	}
-	return UpdatePoolCapacity(ctx, l.externalIPPoolDao, poolID, -1)
-}
-
-func (l *externalIPLifecycle) deleteNATGateway(ctx context.Context, id string) error {
-	_, natGateway, err := l.lockNATGateway(ctx, id)
-	if err != nil {
-		return err
-	}
-	return l.deleteLockedNATGateway(ctx, natGateway)
+	_, err := l.externalIPDao.Delete().SetId(externalIP.GetId()).Do(ctx)
+	return err
 }
 
 func (l *externalIPLifecycle) deleteLockedNATGateway(ctx context.Context, natGateway *privatev1.NATGateway) error {
 	_, err := l.natGatewayDao.Delete().SetId(natGateway.GetId()).Do(ctx)
 	return err
-}
-
-func (l *externalIPLifecycle) deleteNATGatewayAndExternalIP(ctx context.Context, id string) error {
-	parent, natGateway, err := l.lockNATGateway(ctx, id)
-	if err != nil {
-		return err
-	}
-	if _, err = l.natGatewayDao.Delete().SetId(natGateway.GetId()).Do(ctx); err != nil {
-		return err
-	}
-	return l.deleteLockedExternalIP(ctx, parent)
 }

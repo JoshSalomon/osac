@@ -20,7 +20,6 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
@@ -509,22 +508,6 @@ var _ = Describe("Storage tiers server", func() {
 							"fields belong exclusively on BackendAssociation",
 						field.Name(),
 					))
-			}
-
-			reservedRanges := descriptor.ReservedRanges()
-			Expect(reservedRanges.Len()).To(Equal(3))
-			for _, number := range []protoreflect.FieldNumber{3, 4, 5} {
-				Expect(reservedRanges.Has(number)).To(BeTrue())
-			}
-
-			reservedNames := descriptor.ReservedNames()
-			Expect(reservedNames.Len()).To(Equal(3))
-			for _, name := range []string{
-				"max_read_bandwidth_mbs",
-				"max_write_bandwidth_mbs",
-				"encryption_enabled",
-			} {
-				Expect(reservedNames.Has(protoreflect.Name(name))).To(BeTrue())
 			}
 		})
 

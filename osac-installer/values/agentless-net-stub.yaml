@@ -1,0 +1,15 @@
+global:
+  expertOverrides:
+    # Profiles such as caas-ci preserve their AAP settings unless this facade
+    # is explicitly allowed to derive the AgentlessNet backend.
+    aap: false
+  networking:
+    fabricManager: agentless_net
+    k8sManager: ""
+    networkClass:
+      title: AgentlessNet VirtualNetwork and Subnet baseline
+      description: >-
+        Implements UID-keyed VirtualNetwork namespaces, /31 transit links,
+        Cumulus Subnet VLANs and gateways, and per-VirtualNetwork DHCP.
+        SecurityGroups, NAT, workload attachment, BGP, and external access
+        remain unsupported.

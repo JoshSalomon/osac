@@ -33,3 +33,9 @@ endif
 .PHONY: image-push
 image-push: ## Push container image.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: kind-load-image
+kind-load-image: ## Load the built image into the dev-full Kind cluster.
+	$(call kind-load-image,$(IMG))
+
+include $(shell git rev-parse --show-toplevel)/osac-installer/scripts/dev-full/kind-load-image.mk

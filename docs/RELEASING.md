@@ -12,8 +12,19 @@ workflows trigger it:
 ```
 schedule (03:00 UTC)  ──►  nightly-build.yaml       ──┐
                                                           ├──►  osac-build-and-publish.yaml
-workflow_dispatch     ──►  osac-release.yaml         ──┘        (prepare → build → test → publish → tag)
+workflow_dispatch     ──►  osac-release.yaml         ──┘        (prepare → build → test →
+                                                                  promote-and-publish → publish-umbrella →
+                                                                  tag → notify-release)
 ```
+
+In release mode, `tag` also fans out to three more jobs —
+`create-component-releases`, `publish-fulfillment-service-binaries`, and
+`publish-fulfillment-service-proto` — and `notify-release` waits for all
+three (tolerating each as `skipped`, the normal outcome in nightly mode or
+when a release doesn't touch the relevant components) before announcing
+success, so a later failure in any of them can't be contradicted by an
+already-sent success message. See "What you get on success" below for
+what each of those three actually produces.
 
 - **`osac-build-and-publish.yaml`** — the real pipeline: resolves every
   component's version, builds and tests whatever needs building, packages
@@ -131,14 +142,51 @@ for validating the release *mechanism* itself (e.g. after a change to
 - Every image and chart signed with cosign; see the root
   [`README.md`](../README.md#verifying-container-image-signatures) for
   how to verify a specific artifact.
-- A GitHub Release page for every bumped component that has one:
-  `osac-operator`, `osac-aap`, `bare-metal-fulfillment-operator`,
-  `osac-csi-driver`, and `osac-metering` (`fulfillment-service` and
-  `osac-ui` don't get one — never did).
-- If `fulfillment-service` was bumped this run: its signed release
-  binaries (attached to its own GitHub Release, separate from the plain
-  changelog releases above) and its proto schema pushed to the buf.build
+- A plain changelog-style GitHub Release page for every bumped component
+  among `osac-operator`, `osac-aap`, `bare-metal-fulfillment-operator`,
+  `osac-csi-driver`, and `osac-metering` (`osac-ui` never gets one, on any
+  release).
+- If `fulfillment-service` was bumped this run: its own GitHub Release
+  page too, but a different kind — created by goreleaser with its signed
+  release binaries attached, not the plain changelog style above — plus
+  its proto schema pushed to the buf.build
   registry.
+- A real **staging release** to Red Hat's registry — see "Staging release
+  (Konflux)" below.
+
+## Staging release (Konflux)
+
+Every release run also triggers a separate, independent build through
+Konflux, Red Hat's internal build/release system. `osac-release.yaml`'s
+final job, `trigger-konflux-staging-release`, waits for a fixed set of
+eight Konflux image components — `fulfillment-service`, `osac-operator`,
+`osac-csi-driver`, `bare-metal-fulfillment-operator`, `osac-ui`,
+`metering-service`, `metering-m360-adapter`, and `metering-echo-adapter`
+— to finish building and pass their policy gates, then releases that
+whole set together to the **staging** registry
+(`registry.stage.redhat.io`, under `cloud-extensions/<component>-rhel10`).
+This wait set is fixed regardless of what `component_versions` actually
+bumped this run; `osac-aap` has no Konflux image component yet and is
+never included. This is currently staging only — there is no automated
+path to a production release yet.
+
+A component only reaches staging if its Konflux build passes Red Hat's
+Enterprise Contract policy — a set of supply-chain and security checks
+every component must satisfy. The one check worth knowing about
+directly: a clean **Snyk Code (SAST)** scan, which requires a
+`snyk-secret` (key `snyk_token`) to already exist in the `osac-tenant`
+namespace on the Konflux cluster — without it, the scan is skipped
+outright and the policy fails for that reason alone. The rest of the
+policy (hermetic build integrity, SBOM/signature requirements, and so on)
+is Konflux's own concern and isn't something this repo's release process
+needs to reason about directly.
+
+On success, each component's image is live on `registry.stage.redhat.io`,
+signed and with an SBOM attached, and gets a real Pyxis catalog entry
+(`catalog.stage.redhat.com/software/containers/cloud-extensions/<component>-rhel10`)
+plus a stage errata advisory. The GHCR-side publish and the Konflux
+staging release are independent — a failure in one doesn't undo the
+other.
 
 ## Releasing a new component version
 

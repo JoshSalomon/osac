@@ -20,8 +20,9 @@ import (
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
-	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/computeinstancespec"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	"github.com/osac-project/osac/fulfillment-service/internal/utils"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
@@ -35,6 +36,7 @@ func validateAndCanonicalizeComputeInstanceCatalogItemPolicies(
 	item *privatev1.ComputeInstanceCatalogItem,
 	instanceTypesDao *dao.GenericDAO[*privatev1.InstanceType],
 	diskImagesDao *dao.GenericDAO[*privatev1.DiskImage],
+	secretsDao *dao.GenericDAO[*privatev1.Secret],
 	storageTiersDao *dao.GenericDAO[*privatev1.StorageTier],
 	subnetsDao *dao.GenericDAO[*privatev1.Subnet],
 	securityGroupsDao *dao.GenericDAO[*privatev1.SecurityGroup],
@@ -54,6 +56,9 @@ func validateAndCanonicalizeComputeInstanceCatalogItemPolicies(
 		return nil, err
 	}
 	warnings = append(warnings, imageWarnings...)
+	if err := validateComputeInstanceCatalogItemSSHKeyPolicy(ctx, scope, fields.GetSshKey(), secretsDao); err != nil {
+		return nil, err
+	}
 
 	if err := validateComputeInstanceCatalogItemBootDiskPolicy(ctx, fields.GetBootDisk(), storageTiersDao); err != nil {
 		return nil, err
@@ -70,10 +75,61 @@ func validateAndCanonicalizeComputeInstanceCatalogItemPolicies(
 	return warnings, validateComputeInstanceCatalogItemScalarPolicies(fields)
 }
 
+// validateComputeInstanceCatalogItemSSHKeyPolicy checks a locked SSH key or editable default
+// in the Catalog Item's exact tenant/project, verifies its type, and stores its ID and name.
+// Shared offerings may leave the key editable but cannot choose a tenant-local key.
+func validateComputeInstanceCatalogItemSSHKeyPolicy(
+	ctx context.Context,
+	scope referenceScope,
+	policy *privatev1.SecretReferenceFieldPolicy,
+	secretsDao *dao.GenericDAO[*privatev1.Secret],
+) error {
+	if policy == nil {
+		return nil
+	}
+	state, err := decodeSecretReferencePolicy(policy)
+	if err != nil {
+		return catalogItemPolicyError("fields.ssh_key", err.Error())
+	}
+	if err := validateSharedCatalogItemLocalReferencePolicy(scope, "fields.ssh_key", state.hasLocked, state.hasDefault); err != nil {
+		return err
+	}
+	resolve := func(ref *privatev1.SecretLocalReference) (*privatev1.SecretLocalReference, error) {
+		if ref == nil {
+			return nil, nil
+		}
+		resolved, resolveErr := resolveLockedResourceInScope(ctx, secretsDao, scope, ref.GetId(), ref.GetName(),
+			"secret", " in fields.ssh_key", grpccodes.InvalidArgument)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		if err := validateResolvedSecretLifecycleAndType(resolved, refKey(ref), "fields.ssh_key",
+			privatev1.SecretType_SECRET_TYPE_SSH_PUBLIC_KEY); err != nil {
+			return nil, err
+		}
+		return canonicalSecretLocalReference(resolved), nil
+	}
+	if state.hasLocked {
+		canonical, resolveErr := resolve(state.lockedValue)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		policy.SetLocked(canonical)
+	}
+	if state.hasDefault {
+		canonical, resolveErr := resolve(state.defaultValue)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		policy.GetEditable().SetDefaultValue(canonical)
+	}
+	return nil
+}
+
 // applyComputeInstanceCatalogItemPolicies merges the offering's field rules into a new VM spec.
 // It rejects caller values for locked fields, keeps caller values for editable fields, and copies
 // locked/default values into omitted fields. Explicit zero, false, and empty strings count as
-// supplied; empty collections follow their existing omitted-input behavior. The caller discards
+// supplied; empty additional disk lists are present when their wrapper is set. The caller discards
 // this spec on error and resolves copied references and Template defaults afterward.
 func applyComputeInstanceCatalogItemPolicies(spec *privatev1.ComputeInstanceSpec, fields *privatev1.ComputeInstanceCatalogItemFields) error {
 	if spec == nil || fields == nil {
@@ -82,11 +138,11 @@ func applyComputeInstanceCatalogItemPolicies(spec *privatev1.ComputeInstanceSpec
 	if err := applyPolicy(fields.GetDiskImage(), spec.HasDiskImage(), spec.SetDiskImage, decodeDiskImageReferencePolicy, cloneMessage[*privatev1.DiskImageReference]); err != nil {
 		return fmt.Errorf("disk_image: %w", err)
 	}
+	if err := applyPolicy(fields.GetSshKey(), spec.GetSshKey() != nil, spec.SetSshKey, decodeSecretReferencePolicy, cloneMessage[*privatev1.SecretLocalReference]); err != nil {
+		return fmt.Errorf("ssh_key: %w", err)
+	}
 	if err := applyPolicy(fields.GetInstanceType(), spec.HasInstanceType(), spec.SetInstanceType, decodeInstanceTypeReferencePolicy, cloneMessage[*privatev1.InstanceTypeReference]); err != nil {
 		return fmt.Errorf("instance_type: %w", err)
-	}
-	if err := applyPolicy(fields.GetSshPublicKey(), spec.HasSshPublicKey(), spec.SetSshPublicKey, decodeStringPolicy, identity[string]); err != nil {
-		return fmt.Errorf("ssh_public_key: %w", err)
 	}
 	if err := applyPolicy(fields.GetRunStrategy(), spec.HasRunStrategy(), spec.SetRunStrategy, decodeComputeInstanceRunStrategyPolicy, identity[privatev1.ComputeInstanceRunStrategy]); err != nil {
 		return fmt.Errorf("run_strategy: %w", err)
@@ -100,7 +156,7 @@ func applyComputeInstanceCatalogItemPolicies(spec *privatev1.ComputeInstanceSpec
 	if err := applyPolicy(fields.GetNetworkAttachments(), len(spec.GetNetworkAttachments()) > 0, spec.SetNetworkAttachments, decodeComputeInstanceNetworkAttachmentListPolicy, cloneComputeInstanceNetworkAttachments); err != nil {
 		return fmt.Errorf("network_attachments: %w", err)
 	}
-	if err := applyPolicy(fields.GetAdditionalDisks(), len(spec.GetAdditionalDisks()) > 0, spec.SetAdditionalDisks, decodeComputeInstanceDiskListPolicy, cloneComputeInstanceDisks); err != nil {
+	if err := applyPolicy(fields.GetAdditionalDisks(), spec.GetAdditionalDisks() != nil, spec.SetAdditionalDisks, decodeComputeInstanceDiskListPolicy, cloneComputeInstanceDiskList); err != nil {
 		return fmt.Errorf("additional_disks: %w", err)
 	}
 	return applyComputeInstanceCatalogItemBootDiskPolicies(spec, fields.GetBootDisk())
@@ -200,7 +256,7 @@ func validateComputeInstanceCatalogItemBootDiskPolicy(
 		if ref == nil {
 			return nil, nil
 		}
-		resolved, resolveErr := resolveLockedResourceInScope(ctx, storageTiersDao, referenceScope{tenant: auth.SharedTenant}, ref.GetId(), ref.GetName(),
+		resolved, resolveErr := resolveLockedPlatformResource(ctx, storageTiersDao, ref.GetId(), ref.GetName(),
 			"storage tier", " in fields.boot_disk.storage_tier", grpccodes.NotFound)
 		if resolveErr != nil {
 			return nil, resolveErr
@@ -240,19 +296,15 @@ func validateComputeInstanceCatalogItemAdditionalDisksPolicy(
 	if err != nil {
 		return catalogItemPolicyError("fields.additional_disks", err.Error())
 	}
+	// Additional-disk entries must be complete because Template defaults do not merge into this list.
 	resolveDisks := func(disks []*privatev1.ComputeInstanceDisk) error {
 		for i, disk := range disks {
-			if disk == nil {
-				return grpcstatus.Errorf(grpccodes.InvalidArgument, "field 'fields.additional_disks[%d]' must not be null", i)
-			}
-			if disk.HasSizeGib() && disk.GetSizeGib() <= 0 {
-				return grpcstatus.Errorf(grpccodes.InvalidArgument, "field 'fields.additional_disks[%d].size_gib' must be greater than zero", i)
+			if err := utils.ValidateCompleteComputeInstanceDisk(disk); err != nil {
+				return grpcstatus.Errorf(grpccodes.InvalidArgument,
+					"field 'fields.additional_disks[%d]' is incomplete: %s", i, err)
 			}
 			ref := disk.GetStorageTier()
-			if ref == nil {
-				continue
-			}
-			resolved, resolveErr := resolveLockedResourceInScope(ctx, storageTiersDao, referenceScope{tenant: auth.SharedTenant}, ref.GetId(), ref.GetName(),
+			resolved, resolveErr := resolveLockedPlatformResource(ctx, storageTiersDao, ref.GetId(), ref.GetName(),
 				"storage tier", fmt.Sprintf(" in fields.additional_disks[%d].storage_tier", i), grpccodes.NotFound)
 			if resolveErr != nil {
 				return resolveErr
@@ -265,12 +317,12 @@ func validateComputeInstanceCatalogItemAdditionalDisksPolicy(
 		return nil
 	}
 	if state.hasLocked {
-		if err := resolveDisks(state.lockedValue); err != nil {
+		if err := resolveDisks(state.lockedValue.GetItems()); err != nil {
 			return err
 		}
 	}
 	if state.hasDefault {
-		if err := resolveDisks(state.defaultValue); err != nil {
+		if err := resolveDisks(state.defaultValue.GetItems()); err != nil {
 			return err
 		}
 	}
@@ -300,14 +352,12 @@ func validateComputeInstanceCatalogItemNetworkAttachmentsPolicy(
 	if err := validateSharedCatalogItemLocalReferencePolicy(scope, "fields.network_attachments", state.hasLocked, state.hasDefault); err != nil {
 		return err
 	}
+	// Validate list structure before resolving and canonicalizing each attachment dependency.
 	validateAttachments := func(attachments []*privatev1.ComputeNetworkAttachment) error {
+		if err := computeinstancespec.ValidateNetworkAttachments(attachments); err != nil {
+			return catalogItemPolicyError("fields.network_attachments", err.Error())
+		}
 		for i, attachment := range attachments {
-			if attachment == nil {
-				return grpcstatus.Errorf(grpccodes.InvalidArgument, "field 'fields.network_attachments[%d]' must not be null", i)
-			}
-			if attachment.GetSubnet() == nil {
-				return grpcstatus.Errorf(grpccodes.InvalidArgument, "field 'fields.network_attachments[%d].subnet' is required", i)
-			}
 			subnetRef := attachment.GetSubnet()
 			resolvedSubnet, resolveErr := resolveCatalogItemSubnet(ctx, subnetsDao, scope, subnetRef,
 				fmt.Sprintf(" in fields.network_attachments[%d].subnet", i), fmt.Sprintf(" in fields.network_attachments[%d].subnet", i), fmt.Sprintf(" in fields.network_attachments[%d]", i))
@@ -345,14 +395,6 @@ func validateComputeInstanceCatalogItemNetworkAttachmentsPolicy(
 
 // validateComputeInstanceCatalogItemScalarPolicies checks the supported scalar policies and returns the first invalid value.
 func validateComputeInstanceCatalogItemScalarPolicies(fields *privatev1.ComputeInstanceCatalogItemFields) error {
-	if err := validateCatalogItemStringPolicy(fields.GetSshPublicKey(), "fields.ssh_public_key", func(value string) error {
-		if value == "" {
-			return nil
-		}
-		return validateOpenSSHPublicKey(value)
-	}); err != nil {
-		return err
-	}
 	if _, err := decodeComputeInstanceRunStrategyPolicy(fields.GetRunStrategy()); err != nil {
 		return catalogItemPolicyError("fields.run_strategy", err.Error())
 	}
@@ -448,29 +490,29 @@ func decodeInstanceTypeReferencePolicy(
 // Returned message/list values may alias the policy and must be copied before resource assignment.
 func decodeComputeInstanceDiskListPolicy(
 	policy *privatev1.ComputeInstanceDiskListFieldPolicy,
-) (policyState[[]*privatev1.ComputeInstanceDisk], error) {
+) (policyState[*privatev1.ComputeInstanceDiskList], error) {
 	if policy == nil {
-		return policyState[[]*privatev1.ComputeInstanceDisk]{}, nil
+		return policyState[*privatev1.ComputeInstanceDiskList]{}, nil
 	}
 	if policy.HasLocked() {
 		locked := policy.GetLocked()
 		if locked == nil {
-			return policyState[[]*privatev1.ComputeInstanceDisk]{}, fmt.Errorf("locked additional disks policy is empty")
+			return policyState[*privatev1.ComputeInstanceDiskList]{}, fmt.Errorf("locked additional disks policy is empty")
 		}
-		return policyState[[]*privatev1.ComputeInstanceDisk]{hasLocked: true, lockedValue: locked.GetItems()}, nil
+		return policyState[*privatev1.ComputeInstanceDiskList]{hasLocked: true, lockedValue: locked}, nil
 	}
 	if policy.HasEditable() {
 		editable := policy.GetEditable()
 		if editable == nil {
-			return policyState[[]*privatev1.ComputeInstanceDisk]{}, fmt.Errorf("editable additional disks policy is empty")
+			return policyState[*privatev1.ComputeInstanceDiskList]{}, fmt.Errorf("editable additional disks policy is empty")
 		}
 		defaultValue := editable.GetDefaultValue()
 		if defaultValue == nil {
-			return policyState[[]*privatev1.ComputeInstanceDisk]{}, nil
+			return policyState[*privatev1.ComputeInstanceDiskList]{}, nil
 		}
-		return policyState[[]*privatev1.ComputeInstanceDisk]{hasDefault: true, defaultValue: defaultValue.GetItems()}, nil
+		return policyState[*privatev1.ComputeInstanceDiskList]{hasDefault: true, defaultValue: defaultValue}, nil
 	}
-	return policyState[[]*privatev1.ComputeInstanceDisk]{}, fmt.Errorf("additional disks policy has no behavior")
+	return policyState[*privatev1.ComputeInstanceDiskList]{}, fmt.Errorf("additional disks policy has no behavior")
 }
 
 // decodeComputeInstanceNetworkAttachmentListPolicy decodes the selected locked/default policy value without mutating the policy.
@@ -503,21 +545,6 @@ func decodeComputeInstanceNetworkAttachmentListPolicy(
 	return policyState[[]*privatev1.ComputeNetworkAttachment]{}, fmt.Errorf("network attachments policy has no behavior")
 }
 
-// cloneComputeInstanceDisks copies the collection and its protobuf values, retaining nil entries.
-// The result can be modified without changing the source policy.
-func cloneComputeInstanceDisks(value []*privatev1.ComputeInstanceDisk) []*privatev1.ComputeInstanceDisk {
-	if value == nil {
-		return nil
-	}
-	result := make([]*privatev1.ComputeInstanceDisk, len(value))
-	for i, disk := range value {
-		if disk != nil {
-			result[i] = cloneMessage(disk)
-		}
-	}
-	return result
-}
-
 // cloneComputeInstanceNetworkAttachments copies the collection and its protobuf values, retaining nil entries.
 // The result can be modified without changing the source policy.
 func cloneComputeInstanceNetworkAttachments(value []*privatev1.ComputeNetworkAttachment) []*privatev1.ComputeNetworkAttachment {
@@ -531,4 +558,20 @@ func cloneComputeInstanceNetworkAttachments(value []*privatev1.ComputeNetworkAtt
 		}
 	}
 	return result
+}
+
+// cloneComputeInstanceDiskList copies the wrapper and its protobuf values, retaining nil entries.
+// The result can be modified without changing the source policy.
+func cloneComputeInstanceDiskList(value *privatev1.ComputeInstanceDiskList) *privatev1.ComputeInstanceDiskList {
+	if value == nil {
+		return nil
+	}
+	items := value.GetItems()
+	clonedItems := make([]*privatev1.ComputeInstanceDisk, len(items))
+	for i, disk := range items {
+		if disk != nil {
+			clonedItems[i] = cloneMessage(disk)
+		}
+	}
+	return privatev1.ComputeInstanceDiskList_builder{Items: clonedItems}.Build()
 }

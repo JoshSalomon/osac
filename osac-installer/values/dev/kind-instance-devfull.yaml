@@ -10,26 +10,17 @@
 # controller itself stays enabled (kind-instance.yaml: operator.controllers.networking=true)
 # so it still runs and marks resources Ready.
 operator:
+  image:
+    pullPolicy: IfNotPresent
   controllers:
     networkingProvisioning: false
     storage: true
     volume: true
 
-# --- CSI Driver & Backends ---
-# Enable the OSAC CSI driver for persistent volume provisioning via storage tiers.
-# For dev-full, we leave fulfillment.endpoint empty so it uses in-memory stubs
-# (no real vendor backend integration needed for local dev).
-#
-# CSI backends (VAST, Pure, NetApp) are available but not enabled for local dev.
-# The driver uses vendorControllers="local=none" for node-local storage (hostPath,
-# local PVs) which doesn't require external storage array controllers.
-csiDriver:
+# Reuse the local storage registration hook so tenant onboarding provisions a
+# tenant-labeled TopoLVM StorageClass for the existing "local" storage tier.
+lvms:
   enabled: true
-
-# csiBackends chart is deployed (same condition as csiDriver), but all vendor
-# backends are disabled. To enable a backend for testing, set csiBackends.<vendor>.enabled: true
-# and provide the required credentials/configuration. Available backends: vast, pure, trident.
-csiBackends: {}
 
 # --- Browser-reachable endpoints (dev-full only) ---
 # dev-full drives the full "create a VM from the UI" flow in a real browser, so
@@ -45,6 +36,11 @@ csiBackends: {}
 # left as-is — only in-cluster controllers use it, never the browser.
 service:
   externalHostname: fulfillment-api.osac.localhost
+  images:
+    service:
+      pullPolicy: IfNotPresent
+    envoy:
+      pullPolicy: IfNotPresent
   auth:
     issuerUrl: https://keycloak.osac.localhost:8443/realms/osac
   idp:

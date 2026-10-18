@@ -19,6 +19,10 @@ class ImageBuildDispatchTest(unittest.TestCase):
         self.ui = self.root / "osac-ui"
         self.ui.mkdir()
         shutil.copyfile(MAKEFILE, self.ui / "Makefile")
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        kind_load = self.root / "osac-installer/scripts/dev-full/kind-load-image.mk"
+        kind_load.parent.mkdir(parents=True)
+        shutil.copyfile(MAKEFILE.parents[1] / "osac-installer/scripts/dev-full/kind-load-image.mk", kind_load)
         self.log = self.root / "calls"
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -94,7 +98,7 @@ class ImageBuildDispatchTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(
                     self.calls(),
-                    ["podman build -f Containerfile -t ghcr.io/osac-project/osac-ui:latest ."],
+                    ["podman build -f Containerfile -t ghcr.io/osac-project/osac-ui:latest .."],
                 )
 
 

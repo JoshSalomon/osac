@@ -3,6 +3,8 @@
 # --- Service Enablement ---
 global:
   osacDeploymentId: "ci/osac"
+  fulfillmentTrust:
+    enabled: false
   services:
     caas:
       enabled: false
@@ -12,10 +14,17 @@ global:
       enabled: false
     maas:
       enabled: false
-
-# --- CSI Driver ---
-csiDriver:
-  enabled: true
+  networking:
+    fabricManager: ""
+    k8sManager: k8s_only
+    netris:
+      # Keep CI safe for any shared Netris configuration.
+      validateCerts: false
+    networkClass:
+      title: "K8s-only networking"
+      description: >-
+        VMaaS overlay without a physical fabric. VirtualNetwork/Subnet use CUDN,
+        SecurityGroup uses NetworkPolicy, ExternalIP uses MetalLB L2.
 
 # --- Operator ---
 operator:
@@ -25,6 +34,8 @@ operator:
     pullPolicy: Always
   provisioning:
     provider: "aap"
+  vendorControllers:
+    lvms: none
   aap:
     insecureSkipVerify: "true"
     tokenSecret:
@@ -32,7 +43,10 @@ operator:
       key: token
   fulfillment:
     serverAddress: "fulfillment-internal-api:8001"
-    tokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    credentials:
+      secretName: fulfillment-controller-credentials
+      clientIdKey: client-id
+      clientSecretKey: client-secret
   controllers:
     tenant: true
     networking: true
@@ -42,15 +56,6 @@ operator:
   tenants:
   - name: shared
   - name: osac-e2e-ci
-  # VMaaS has no physical fabric. Register k8s_only so the dispatcher can
-  # stamp ExternalIP/VN/SG onto the composite role (CUDN + NetworkPolicy +
-  # MetalLB L2) instead of fabricManager cudn_net, which cannot provision
-  # ExternalIP pools.
-  networkManagers:
-    k8sManagers:
-      k8s_only:
-        enabled: true
-        capabilities: "ipv4,ipv6,dualStack"
 
 # --- Fulfillment Service ---
 service:
@@ -58,8 +63,14 @@ service:
   internalHostname: ""  # Set dynamically by make install-osac
   variant: openshift
   images:
-    service: ghcr.io/osac-project/fulfillment-service:main
-    envoy: ghcr.io/osac-project/envoy:v1.33.0
+    service:
+      repository: ghcr.io/osac-project/fulfillment-service
+      tag: latest
+      pullPolicy: Always
+    envoy:
+      repository: ghcr.io/osac-project/envoy
+      tag: v1.33.0
+      pullPolicy: IfNotPresent
   certs:
     issuerRef:
       kind: ClusterIssuer
@@ -72,8 +83,6 @@ service:
     # install-osac sets --set global.clusterDomain=$(DOMAIN).
     emergencyServiceAccounts:
     - admin
-    - osac-operator
-    - osac-operator-controller-manager
     - template-publisher
     - osac-metering
     controllerCredentials:
@@ -144,6 +153,8 @@ ui:
         caBundle:
           configMap: ca-bundle
   auth:
+    # oidcIssuerURL defaults to match service.auth.issuerUrl -- set automatically
+    # by install-osac via --set ui.auth.oidcIssuerURL when global.clusterDomain is set.
     certs:
       caBundle:
         configMap: ca-bundle
@@ -237,4 +248,3 @@ networkClass:
     SecurityGroup uses NetworkPolicy, ExternalIP uses MetalLB L2.
   fabricManager: ""
   k8sManager: "k8s_only"
-  isDefault: true

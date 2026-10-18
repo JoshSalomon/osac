@@ -21,16 +21,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
-	"github.com/osac-project/osac/fulfillment-service/internal/events"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 type SecurityGroupsServerBuilder struct {
 	logger            *slog.Logger
-	notifier          events.Notifier
 	attributionLogic  auth.AttributionLogic
 	tenancyLogic      auth.TenancyLogic
 	metricsRegisterer prometheus.Registerer
@@ -42,7 +41,7 @@ type SecurityGroupsServer struct {
 	publicv1.UnimplementedSecurityGroupsServer
 
 	logger    *slog.Logger
-	delegate  privatev1.SecurityGroupsServer
+	delegate  *PrivateSecurityGroupsServer
 	inMapper  *GenericMapper[*publicv1.SecurityGroup, *privatev1.SecurityGroup]
 	outMapper *GenericMapper[*privatev1.SecurityGroup, *publicv1.SecurityGroup]
 }
@@ -54,12 +53,6 @@ func NewSecurityGroupsServer() *SecurityGroupsServerBuilder {
 // SetLogger sets the logger to use. This is mandatory.
 func (b *SecurityGroupsServerBuilder) SetLogger(value *slog.Logger) *SecurityGroupsServerBuilder {
 	b.logger = value
-	return b
-}
-
-// SetNotifier sets the notifier to use. This is optional.
-func (b *SecurityGroupsServerBuilder) SetNotifier(value events.Notifier) *SecurityGroupsServerBuilder {
-	b.notifier = value
 	return b
 }
 
@@ -112,7 +105,6 @@ func (b *SecurityGroupsServerBuilder) Build() (result *SecurityGroupsServer, err
 	// Create the private server to delegate to:
 	delegate, err := NewPrivateSecurityGroupsServer().
 		SetLogger(b.logger).
-		SetNotifier(b.notifier).
 		SetAttributionLogic(b.attributionLogic).
 		SetTenancyLogic(b.tenancyLogic).
 		SetMetricsRegisterer(b.metricsRegisterer).
@@ -255,63 +247,60 @@ func (s *SecurityGroupsServer) Create(ctx context.Context,
 
 func (s *SecurityGroupsServer) Update(ctx context.Context,
 	request *publicv1.SecurityGroupsUpdateRequest) (response *publicv1.SecurityGroupsUpdateResponse, err error) {
-	// Validate the request:
 	publicSecurityGroup := request.GetObject()
 	if publicSecurityGroup == nil {
 		err = grpcstatus.Errorf(grpccodes.InvalidArgument, "object is mandatory")
 		return
 	}
-	id := publicSecurityGroup.GetId()
-	if id == "" {
+	if publicSecurityGroup.GetId() == "" {
 		err = grpcstatus.Errorf(grpccodes.InvalidArgument, "object identifier is mandatory")
 		return
 	}
-
-	// Get the existing object from the private server:
-	getRequest := &privatev1.SecurityGroupsGetRequest{}
-	getRequest.SetId(id)
-	getResponse, err := s.delegate.Get(ctx, getRequest)
-	if err != nil {
-		return nil, err
+	if publicSecurityGroup.GetSpec() == nil {
+		err = grpcstatus.Errorf(grpccodes.InvalidArgument, "object spec is mandatory")
+		return
 	}
-	existingPrivateSecurityGroup := getResponse.GetObject()
 
-	// Map the public changes to the existing private object (preserving private data):
-	err = s.inMapper.Copy(ctx, publicSecurityGroup, existingPrivateSecurityGroup)
+	privateSecurityGroup := &privatev1.SecurityGroup{}
+	err = s.inMapper.Copy(ctx, publicSecurityGroup, privateSecurityGroup)
 	if err != nil {
 		s.logger.ErrorContext(
 			ctx,
-			"Failed to map public security group to private",
+			"Failed to map public security group update to private",
 			slog.Any("error", err),
 		)
 		err = grpcstatus.Errorf(grpccodes.Internal, "failed to process security group")
 		return
 	}
+	// Public callers may update only the rule lists. Keep the identifier needed
+	// for lookup, but discard client-supplied metadata, status, and the immutable
+	// parent reference before the private server validates the candidate.
+	privateSecurityGroup.Metadata = nil
+	privateSecurityGroup.Status = nil
+	privateSecurityGroup.Spec.VirtualNetwork = nil
 
-	// Delegate to the private server with the merged object:
 	privateRequest := &privatev1.SecurityGroupsUpdateRequest{}
-	privateRequest.SetObject(existingPrivateSecurityGroup)
-	privateRequest.SetLock(request.GetLock())
-	privateResponse, err := s.delegate.Update(ctx, privateRequest)
+	privateRequest.SetObject(privateSecurityGroup)
+	// Public callers can replace rule lists only. Never trust a caller-provided
+	// field mask to update the SecurityGroup's identity, metadata, or status.
+	privateRequest.SetUpdateMask(&fieldmaskpb.FieldMask{Paths: []string{"spec.ingress", "spec.egress"}})
+	privateResponse, err := s.delegate.updateFromPublic(ctx, privateRequest)
 	if err != nil {
 		return nil, err
 	}
 
-	// Map the private response back to public format:
-	updatedPrivateSecurityGroup := privateResponse.GetObject()
 	updatedPublicSecurityGroup := &publicv1.SecurityGroup{}
-	err = s.outMapper.Copy(ctx, updatedPrivateSecurityGroup, updatedPublicSecurityGroup)
+	err = s.outMapper.Copy(ctx, privateResponse.GetObject(), updatedPublicSecurityGroup)
 	if err != nil {
 		s.logger.ErrorContext(
 			ctx,
-			"Failed to map private security group to public",
+			"Failed to map updated private security group to public",
 			slog.Any("error", err),
 		)
 		err = grpcstatus.Errorf(grpccodes.Internal, "failed to process security group")
 		return
 	}
 
-	// Create the public response:
 	response = &publicv1.SecurityGroupsUpdateResponse{}
 	response.SetObject(updatedPublicSecurityGroup)
 	return

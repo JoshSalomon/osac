@@ -24,6 +24,7 @@ import "osac/private/v1/baremetal_instance_catalog_item_type.proto";
 import "osac/private/v1/baremetal_instance_common_type.proto";
 import "osac/private/v1/baremetal_instance_template_type.proto";
 import "osac/private/v1/baremetal_instance_type_type.proto";
+import "osac/private/v1/cluster_type.proto";
 import "osac/private/v1/condition_status_type.proto";
 import "osac/private/v1/disk_image_type.proto";
 import "osac/private/v1/metadata_type.proto";
@@ -47,9 +48,9 @@ message BareMetalInstance {
 // The spec contains the details of a bare metal instance as desired by the user.
 message BareMetalInstanceSpec {
   option (buf.validate.message).cel = {
-    id: "baremetal_instance_primary_attachment"
-    message: "when multiple network attachments are specified, exactly one must have primary set to true"
-    expression: "this.network_attachments.size() <= 1 || this.network_attachments.filter(a, a.primary == true).size() == 1"
+    id: "baremetal_instance_single_attachment"
+    message: "at most one network attachment is supported"
+    expression: "this.network_attachments.size() <= 1"
   };
 
   // Reference to the BareMetalInstanceCatalogItem. Either `catalog_item` or `template` is required on create.
@@ -115,14 +116,14 @@ message BareMetalInstanceSpec {
   // These parameters can't be modified after the bare metal instance is created.
   map<string, google.protobuf.Any> template_parameters = 6 [(google.api.field_behavior) = IMMUTABLE];
 
-  // Reserved field numbers for removed fields (do not reuse).
+  // Reserved field numbers and names for removed fields. Callers must use `disk_image` instead of `image`.
   reserved 7;
   reserved "image";
 
   // Network attachments for the bare metal instance. One entry per physical NIC.
-  // The list structure is immutable after creation (entries cannot be added or removed),
-  // but security_groups within each entry can be updated.
-  repeated BareMetalNetworkAttachment network_attachments = 8;
+  // The complete attachment list, including subnet and security group references,
+  // physical interface, and primary designation, is immutable after creation.
+  repeated BareMetalNetworkAttachment network_attachments = 8 [(google.api.field_behavior) = IMMUTABLE];
 
   // When true, the system auto-selects an ExternalIPPool and creates an ExternalIP
   // with an ExternalIPAttachment for this instance atomically during creation.
@@ -136,13 +137,15 @@ message BareMetalInstanceSpec {
   // This can't be modified after the bare metal instance is created.
   BareMetalInstanceTemplateReference template = 10 [(google.api.field_behavior) = IMMUTABLE];
 
-  // Reference to a BareMetalInstanceType. Optional; immutable after creation.
-  // When set, the system resolves this to the instance type's host_label_selector and maps it
-  // to the CRD's Selector.HostSelector for host selection. When omitted, host selection falls
-  // back to the catalog item's template host_type.
-  BareMetalInstanceTypeLocalReference instance_type = 11 [(google.api.field_behavior) = IMMUTABLE];
+  // Reference to the BareMetalInstanceType used for hardware placement.
+  // If omitted from the create request, a catalog item or template may provide it.
+  // The resolved reference is immutable after creation.
+  BareMetalInstanceTypeReference instance_type = 11 [(google.api.field_behavior) = IMMUTABLE];
 
-  // Reference to a DiskImage resource. Immutable after creation.
+  // Reference to a DiskImage resource, selected by ID or name. The reference is immutable after creation.
+  // Catalog items can provide a default when callers omit it. The reference must resolve to an image in the instance
+  // tenant or shared tenant. Available images are accepted, deprecated images are accepted with a warning, and
+  // obsolete images are rejected.
   DiskImageReference disk_image = 12 [(google.api.field_behavior) = IMMUTABLE];
 
   // Reference to a Secret containing user data for the bare metal instance.
@@ -181,6 +184,23 @@ message BareMetalInstanceStatus {
   //
   // This will be empty if no state transition has been reported yet.
   optional google.protobuf.Timestamp state_transition_time = 7 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // The cluster that the system created this bare metal instance for, if any.
+  //
+  // For a cluster worker this names the cluster the worker serves for its whole life. Empty for
+  // standalone instances. The system sets it once, at creation, and it never changes; users can't
+  // set or change it.
+  ClusterLocalReference cluster = 8 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // The node set that the bare metal instance serves within its cluster. For a cluster worker
+  // this is the identifier of the node set in the cluster's spec that the worker belongs to.
+  optional string node_set = 9 [
+    (buf.validate.field).string = {
+      max_len: 63,
+      pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+    },
+    (google.api.field_behavior) = OUTPUT_ONLY
+  ];
 }
 
 // Runtime networking state for a single bare metal network attachment.

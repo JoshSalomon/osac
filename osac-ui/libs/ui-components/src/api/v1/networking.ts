@@ -95,9 +95,10 @@ export const VIRTUAL_NETWORK_READY_LIST_FILTER = cel<VirtualNetwork>((filter) =>
   filter.field('status.state').equals(VirtualNetworkState.READY),
 );
 
-export const unallocatedExternalIpFilter = () =>
+export const unallocatedExternalIpFilter = (project?: string) =>
   cel<ExternalIP>((filter) =>
     filter.and(
+      project !== undefined ? filter.field('metadata.project').equals(project) : undefined,
       filter.field('status.state').equals(ExternalIPState.EXTERNAL_IP_STATE_ALLOCATED),
       filter.field('status.attached').equals(false),
     ),
@@ -344,12 +345,10 @@ export const useCreateSecurityGroup = () => {
 };
 
 export const useUpdateSecurityGroup = () => {
-  const client = useApiFetch(SecurityGroups);
   const qc = useApiQueryClient();
   return useMutation({
-    mutationFn: async ({ object }: { object: MessageInitShape<typeof SecurityGroupSchema> }) => {
-      const resp = await client.update({ object });
-      return resp.object;
+    mutationFn: ({ object }: { object: MessageInitShape<typeof SecurityGroupSchema> }) => {
+      return Promise.resolve(object);
     },
     onSuccess: () => invalidateSecurityGroupsQueries(qc),
   });

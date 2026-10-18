@@ -5,6 +5,7 @@ or the gRPC / REST API.
 It assumes you already have a Tenant in `Ready` state (see [Tenant Setup Guide](tenant-setup.md))
 and networking resources set up (see [Networking Guide](networking-guide.md)).
 For per-disk storage tier selection, see [Storage tier selection](#storage-tier-selection).
+To change a VM's InstanceType after creation, see [Resizing a VM](computeinstance-resize-guide.md).
 
 ## Contents
 
@@ -12,6 +13,7 @@ For per-disk storage tier selection, see [Storage tier selection](#storage-tier-
 - [Storage tier selection](#storage-tier-selection)
 - [Step 1: Find a Compute Instance Catalog Item](#step-1-find-a-compute-instance-catalog-item)
 - [Step 2: Choose an instance type](#step-2-choose-an-instance-type)
+- [Register an SSH key](#register-an-ssh-key)
 - [Step 3: Create the ComputeInstance](#step-3-create-the-computeinstance)
 - [Step 4: Monitor the instance](#step-4-monitor-the-instance)
 - [Step 5: Access the console](#step-5-access-the-console)
@@ -79,7 +81,11 @@ The fulfillment service resolves each disk independently using this order:
 
 An explicit user value takes precedence over a catalog or template default.
 Catalog item policies still apply: a non-editable field rejects a user value,
-while an editable field with a default accepts an override.
+while an editable field with a default accepts an override. For
+`additional_disks`, omit the field to use the Catalog Item default. If the
+Catalog Item has an editable default and you want no additional disks, set
+`additional_disks` to `{"items": []}` to opt out. See the [CLI and API examples
+below](#select-tiers-when-creating-a-vm) for these request shapes.
 
 Template defaults apply when the user omits a value and the CatalogItem has not
 already supplied one. However, an editable CatalogItem field without a default
@@ -131,13 +137,18 @@ osac create computeinstance \
 ```
 
 Repeat `--additional-disk` for more disks. The CLI requires
-`storage-tier=<name>` in every `--additional-disk` specification. The boot
-disk tier may be omitted when the applicable catalog-item policy does not
-require a user value and a catalog-item or template default supplies it. A
-template default does not satisfy an editable catalog field without a catalog
-default.
+`storage-tier=<name>` in every disk specification. CatalogItems can define a
+default list for `additional_disks`. If the CatalogItem used to create the
+ComputeInstance has this default, pass `--additional-disk ""` to opt out and
+create the instance without additional disks. The field must be editable for
+this override to be accepted.
+The boot disk tier may be omitted when the applicable Catalog Item policy does
+not require a user value and a Catalog Item or Template default supplies it. A
+template default does not satisfy an editable CatalogItem field without a
+CatalogItem default.
 
-The equivalent API shape is:
+The equivalent API shape is shown below. To opt out of a Catalog Item disk
+default, send `"additional_disks": {"items": []}`.
 
 ```json
 {
@@ -146,12 +157,14 @@ The equivalent API shape is:
       "size_gib": 20,
       "storage_tier": {"name": "fast"}
     },
-    "additional_disks": [
-      {
-        "size_gib": 200,
-        "storage_tier": {"name": "archive"}
-      }
-    ]
+    "additional_disks": {
+      "items": [
+        {
+          "size_gib": 200,
+          "storage_tier": {"name": "archive"}
+        }
+      ]
+    }
   }
 }
 ```
@@ -323,6 +336,31 @@ For details on instance type lifecycle and management, see
 
 ---
 
+## Register an SSH key
+
+ComputeInstances can use a registered SSH public key stored in a tenant-scoped Secret. Create the
+Secret before creating the VM:
+
+```bash
+osac create secret \
+  --name <ssh-key-name> \
+  --type ssh-public-key \
+  --from-file public_key=$HOME/.ssh/id_ed25519.pub
+```
+
+The Secret must contain the OpenSSH public key under the `public_key` data entry. List Secrets with
+`osac get secrets`, inspect one with `osac get secret <name-or-id> -o yaml`, and delete one you no
+longer need with `osac delete secret <name-or-id>`. API clients manage the same Secret through
+`osac.public.v1.Secrets` or `POST /api/fulfillment/v1/secrets`, using type
+`SECRET_TYPE_SSH_PUBLIC_KEY` and the `public_key` data entry.
+
+The SSH key is optional. When used, OSAC configures it on the VM's first boot through cloud-init.
+Use it with cloud-init-compatible images; it is not supported with Windows disk images or
+ignition-based user data. The `ssh_key` reference cannot be changed after the ComputeInstance is
+created. API requests can refer to the Secret by name or ID.
+
+---
+
 ## Step 3: Create the ComputeInstance
 
 Create the ComputeInstance using the CLI or API. Use the catalog item and specify
@@ -342,7 +380,7 @@ osac create computeinstance \
   --catalog-item <catalog-item-name-or-id> \
   --instance-type <instance-type-name> \
   --image quay.io/containerdisks/fedora:latest \
-  --ssh-public-key "$(cat ~/.ssh/id_ed25519.pub)" \
+  --ssh-key <ssh-key-name> \
   --boot-disk-size 10 \
   --boot-disk-storage-tier <boot-tier> \
   --additional-disk size=50,storage-tier=<data-tier> \
@@ -370,14 +408,14 @@ grpcurl $GRPCURL_FLAGS -H "Authorization: Bearer $TOKEN" -d '{
         "source_type": "registry",
         "source_ref": "quay.io/containerdisks/fedora:latest"
       },
-      "ssh_public_key": "<ssh-public-key>",
+      "ssh_key": {"name": "<ssh-key-name>"},
       "boot_disk": {
         "size_gib": 10,
         "storage_tier": {"name": "<boot-tier>"}
       },
-      "additional_disks": [
-        {"size_gib": 50, "storage_tier": {"name": "<data-tier>"}}
-      ],
+      "additional_disks": {
+        "items": [{"size_gib": 50, "storage_tier": {"name": "<data-tier>"}}]
+      },
       "network_attachments": [
         {"subnet": "<subnet-id>"}
       ],
@@ -403,14 +441,14 @@ curl -fsS $CURL_FLAGS -X POST -H "Authorization: Bearer $TOKEN" \
       "source_type": "registry",
       "source_ref": "quay.io/containerdisks/fedora:latest"
     },
-    "ssh_public_key": "<ssh-public-key>",
+    "ssh_key": {"name": "<ssh-key-name>"},
     "boot_disk": {
       "size_gib": 10,
       "storage_tier": {"name": "<boot-tier>"}
     },
-    "additional_disks": [
-      {"size_gib": 50, "storage_tier": {"name": "<data-tier>"}}
-    ],
+    "additional_disks": {
+      "items": [{"size_gib": 50, "storage_tier": {"name": "<data-tier>"}}]
+    },
     "network_attachments": [
       {"subnet": "<subnet-id>"}
     ],
@@ -420,8 +458,8 @@ curl -fsS $CURL_FLAGS -X POST -H "Authorization: Bearer $TOKEN" \
 }' "https://$OSAC_API/api/fulfillment/v1/compute_instances"
 ```
 
-> **Note:** The `--ssh-public-key` flag installs your SSH public key on the VM, enabling SSH access
-> once the instance is running. The `--user-data` field uses cloud-init format. The example
+> **Note:** The `--ssh-key` flag refers to a registered SSH public key Secret by name. The
+> `--user-data` field uses cloud-init format. The example
 > above creates a user and disables password expiry, allowing you to log in via the VM
 > console. Adjust the username and password as needed.
 >
@@ -459,15 +497,17 @@ spec:
   image:
     source_ref: quay.io/containerdisks/fedora:latest
     source_type: registry
-  ssh_public_key: <ssh-public-key>
+  ssh_key:
+    name: <ssh-key-name>
   boot_disk:
     size_gib: 10
     storage_tier:
       name: <boot-tier>
   additional_disks:
-    - size_gib: 50
-      storage_tier:
-        name: <data-tier>
+    items:
+      - size_gib: 50
+        storage_tier:
+          name: <data-tier>
   network_attachments:
     - subnet: <subnet-id>
   run_strategy: Always

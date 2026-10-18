@@ -122,7 +122,7 @@ type StorageReconciler struct {
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=tenants/finalizers,verbs=update
 // +kubebuilder:rbac:groups=osac.openshift.io,resources=clusterorders,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=hypershift.openshift.io,resources=hostedcontrolplanes,verbs=get
+// +kubebuilder:rbac:groups=hypershift.openshift.io,resources=hostedcontrolplanes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
@@ -202,6 +202,8 @@ func (r *StorageReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	return res, err
 }
 
+// patchTenantStorageStatus persists computed storage fields from a fresh read so
+// concurrent status fields owned by other controllers are preserved.
 func (r *StorageReconciler) patchTenantStorageStatus(ctx context.Context, key client.ObjectKey, computed v1alpha1.TenantStatus) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &v1alpha1.Tenant{}
@@ -210,6 +212,7 @@ func (r *StorageReconciler) patchTenantStorageStatus(ctx context.Context, key cl
 		}
 		base := latest.DeepCopy()
 		latest.Status.StorageClasses = computed.StorageClasses
+		latest.Status.StorageBackends = computed.StorageBackends
 		latest.Status.ClusterStorage = computed.ClusterStorage
 		latest.Status.StorageBackendJobs = computed.StorageBackendJobs
 		latest.Status.ClusterStorageJobs = computed.ClusterStorageJobs
@@ -241,17 +244,26 @@ func (r *StorageReconciler) patchClusterOrderStorageStatus(ctx context.Context, 
 //   - result: ctrl.Result to return when stop is true
 //   - stop: when true, the caller should return (result, err) immediately
 //   - error: any unexpected failure
-func (r *StorageReconciler) handleBackendReadiness(ctx context.Context, instance *v1alpha1.Tenant, tenantName string) (hubSecretReady bool, result ctrl.Result, stop bool, err error) {
-	hubSecretReady, err = r.hubSecretExists(ctx, tenantName, "")
+//
+// tierDefinitions carries the resolved tier catalog from the Tier API. When
+// non-empty, the check requires hub Secrets for ALL dispatched providers (one
+// per unique TierDefinition.Provider) before declaring StorageBackendReady.
+// When nil or empty (no Tier API configured), it falls back to checking for
+// any hub Secret regardless of provider — preserving backward compatibility.
+func (r *StorageReconciler) handleBackendReadiness(ctx context.Context, instance *v1alpha1.Tenant, tenantName string, tierDefinitions []provisioning.TierDefinition) (hubSecretReady bool, result ctrl.Result, stop bool, err error) {
+	statuses, allReady, err := r.storageBackendStatuses(ctx, tenantName, tierDefinitions)
 	if err != nil {
 		return false, ctrl.Result{}, true, err
 	}
+	instance.Status.StorageBackends = statuses
+	hubSecretReady = allReady
+	readinessMessage := formatStorageBackendReadinessMessage(statuses, hubSecretReady)
 
 	if hubSecretReady {
 		instance.SetStatusCondition(v1alpha1.TenantConditionStorageBackendReady,
 			metav1.ConditionTrue,
 			v1alpha1.TenantReasonFound,
-			fmt.Sprintf("Hub Secret for tenant %q exists", tenantName))
+			readinessMessage)
 		return true, ctrl.Result{}, false, nil
 	}
 
@@ -268,7 +280,7 @@ func (r *StorageReconciler) handleBackendReadiness(ctx context.Context, instance
 		instance.SetStatusCondition(v1alpha1.TenantConditionStorageBackendReady,
 			metav1.ConditionFalse,
 			v1alpha1.TenantReasonNotFound,
-			fmt.Sprintf("Hub Secret for tenant %q not found", tenantName))
+			fmt.Sprintf("%s; Hub Secret for tenant %q not found", readinessMessage, tenantName))
 		provResult, provErr := r.handleBackendProvisioning(ctx, instance)
 		return false, provResult, true, provErr
 	case backendRegistered:
@@ -276,7 +288,7 @@ func (r *StorageReconciler) handleBackendReadiness(ctx context.Context, instance
 		instance.SetStatusCondition(v1alpha1.TenantConditionStorageBackendReady,
 			metav1.ConditionFalse,
 			v1alpha1.TenantReasonBackendConfiguredNoProvider,
-			fmt.Sprintf("Storage backend is registered but no AAP is configured to provision the hub Secret for tenant %q", tenantName))
+			fmt.Sprintf("%s; storage backend is registered but no AAP is configured to provision the hub Secret for tenant %q", readinessMessage, tenantName))
 		return false, ctrl.Result{}, true, nil
 	default:
 		// Fall through to Stage 2 so the controller resolves StorageClasses from
@@ -288,18 +300,20 @@ func (r *StorageReconciler) handleBackendReadiness(ctx context.Context, instance
 			instance.SetStatusCondition(v1alpha1.TenantConditionStorageBackendReady,
 				metav1.ConditionFalse,
 				v1alpha1.TenantReasonNoProvider,
-				"No fulfillment service connection configured; storage backend status unknown")
+				readinessMessage+"; no fulfillment service connection configured; storage backend status unknown")
 		} else {
 			// Connected to fulfillment service but no backend is registered yet.
 			instance.SetStatusCondition(v1alpha1.TenantConditionStorageBackendReady,
 				metav1.ConditionFalse,
 				v1alpha1.TenantReasonNoProvider,
-				"No storage backend registered")
+				readinessMessage+"; no storage backend registered")
 		}
 		return false, ctrl.Result{}, false, nil
 	}
 }
 
+// handleUpdate reconciles Tenant storage readiness and provisioning across the
+// VMaaS target cluster and any CaaS ClusterOrders owned by the Tenant.
 func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1.Tenant) (ctrl.Result, error) {
 	log := ctrllog.FromContext(ctx)
 	tenantName := instance.GetName()
@@ -317,7 +331,7 @@ func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1
 	// handleBackendReadiness), so both Stage 2's tier-coverage validation and
 	// every downstream AAP call in this reconcile see the same result without
 	// re-fetching.
-	ctx, tierDefinitions := resolveAndInjectTierContext(ctx, r.TiersClient, r.BackendsClient, r.SecretsClient, "tenant", tenantName)
+	ctx, tierDefinitions, tierErr := resolveAndInjectTierContext(ctx, r.TiersClient, r.BackendsClient, r.SecretsClient, "tenant", tenantName)
 
 	// Handle individual ClusterOrder deletions while the Tenant is still
 	// alive. When a ClusterOrder is deleted, mapClusterOrderToTenant
@@ -335,14 +349,28 @@ func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1
 		return caasDelResult, caasDelErr
 	}
 
+	// Guard: when tier resolution failed and any provisioning provider is
+	// configured, do not proceed — the downstream AAP calls would run
+	// without storage_tier_definitions and storage_backend_connections,
+	// creating incomplete or wrong resources. This matches the guard in
+	// handleCaaSDelete (OSAC-4855) and extends it to the provisioning paths.
+	// CaaS cluster deletion (above) already ran and is unaffected.
+	if tierErr != nil && (r.BackendProvider != nil || r.ClusterStorageProvider != nil) {
+		log.Error(tierErr, "tier resolution failed, deferring storage provisioning until fulfillment service recovers",
+			"tenant", tenantName)
+		instance.SetStatusCondition(v1alpha1.TenantConditionStorageBackendReady,
+			metav1.ConditionFalse,
+			"TierResolutionFailed",
+			fmt.Sprintf("Storage tier definitions could not be resolved from the fulfillment service: %v", tierErr))
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
+	}
+
 	// Stage 1: check hub Secret and route provisioning based on backend registration.
 	// stop is always true when err is non-nil (handleBackendReadiness invariant).
-	hubSecretReady, stageResult, stop, err := r.handleBackendReadiness(ctx, instance, tenantName)
+	hubSecretReady, stageResult, stop, err := r.handleBackendReadiness(ctx, instance, tenantName, tierDefinitions)
 	if stop {
 		return stageResult, err
 	}
-	// TODO(OSAC-1111): populate StorageBackendStatus once StorageBackend API provides name/provider
-
 	// Stage 2: resolve StorageClasses on target cluster.
 	targetClient, err := getTargetClient(ctx, r.mgr, r.targetCluster)
 	if err != nil {
@@ -350,6 +378,12 @@ func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1
 	}
 
 	clusterName := string(r.targetCluster)
+
+	// hasMissingTiers is set when some defined tiers still lack a
+	// StorageClass. The provisioning retry is deferred past Stage 3
+	// (handleCaaSUpdate) so that CaaS cluster lifecycle management
+	// (finalizer addition/removal, CaaS provisioning) is never blocked.
+	var hasMissingTiers bool
 
 	if r.ClusterStorageProvider != nil {
 		scResult, err := r.resolveTenantSpecificStorageClasses(ctx, targetClient, tenantName)
@@ -369,9 +403,7 @@ func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1
 					v1alpha1.TenantReasonMultipleFound,
 					condMsg)
 				instance.Status.StorageClasses = nil
-				instance.Status.ClusterStorage = []v1alpha1.ClusterStorageStatus{
-					{ClusterName: clusterName, Ready: false, Reason: v1alpha1.TenantReasonMultipleFound},
-				}
+				r.updateTenantVMaaSStorage(instance, clusterName, false, v1alpha1.TenantReasonMultipleFound)
 				return ctrl.Result{}, nil
 			}
 
@@ -382,9 +414,7 @@ func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1
 				v1alpha1.TenantReasonNotFound,
 				condMsg)
 			instance.Status.StorageClasses = nil
-			instance.Status.ClusterStorage = []v1alpha1.ClusterStorageStatus{
-				{ClusterName: clusterName, Ready: false, Reason: v1alpha1.TenantReasonNotFound},
-			}
+			r.updateTenantVMaaSStorage(instance, clusterName, false, v1alpha1.TenantReasonNotFound)
 
 			return r.handleClusterStorageProvisioning(ctx, instance, hubSecretReady)
 		}
@@ -394,14 +424,31 @@ func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1
 			condMsg = condMsg + "; " + strings.Join(scResult.duplicateMessages, "; ")
 		}
 		condMsg = r.appendMissingTierWarnings(instance, tierDefinitions, scResult.resolved, scResult.ambiguousTiers, condMsg)
-		instance.SetStatusCondition(v1alpha1.TenantConditionClusterStorageReady,
-			metav1.ConditionTrue,
-			v1alpha1.TenantReasonFound,
-			condMsg)
-		instance.Status.StorageClasses = scResult.resolved
-		instance.Status.ClusterStorage = []v1alpha1.ClusterStorageStatus{
-			{ClusterName: clusterName, Ready: true, Reason: v1alpha1.TenantReasonFound},
+
+		// Detect tiers that still lack a StorageClass. The hasMissingTiers
+		// flag drives the Stage 4 retry (handleClusterStorageProvisioning).
+		// When tiers are still missing, ClusterStorageReady stays False so
+		// handleCaaSUpdate (Stage 3) does not attempt to provision
+		// cluster-side storage with an incomplete tier set. This is safe
+		// because handleCaaSDelete runs BEFORE this point (line ~339),
+		// so finalizer removal on deleting ClusterOrders is never blocked.
+		missing := missingTierNames(tierDefinitions, scResult.resolved, scResult.ambiguousTiers)
+		hasMissingTiers = len(missing) > 0 && len(tierDefinitions) > 0
+
+		if hasMissingTiers {
+			instance.SetStatusCondition(v1alpha1.TenantConditionClusterStorageReady,
+				metav1.ConditionFalse,
+				v1alpha1.TenantReasonNotFound,
+				condMsg)
+		} else {
+			instance.SetStatusCondition(v1alpha1.TenantConditionClusterStorageReady,
+				metav1.ConditionTrue,
+				v1alpha1.TenantReasonFound,
+				condMsg)
 		}
+		instance.Status.StorageClasses = scResult.resolved
+		r.updateTenantVMaaSStorage(instance, clusterName, !hasMissingTiers, v1alpha1.TenantReasonFound)
+
 	} else {
 		// When no provisioning provider is configured, resolve StorageClasses
 		// labeled osac.openshift.io/tenant=<tenantName>. This serves environments
@@ -427,9 +474,7 @@ func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1
 				reason,
 				condMsg)
 			instance.Status.StorageClasses = nil
-			instance.Status.ClusterStorage = []v1alpha1.ClusterStorageStatus{
-				{ClusterName: clusterName, Ready: false, Reason: reason},
-			}
+			r.updateTenantVMaaSStorage(instance, clusterName, false, reason)
 			return ctrl.Result{}, nil
 		}
 
@@ -439,17 +484,7 @@ func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1
 			v1alpha1.TenantReasonFound,
 			condMsg)
 		instance.Status.StorageClasses = result.resolved
-		instance.Status.ClusterStorage = []v1alpha1.ClusterStorageStatus{
-			{ClusterName: clusterName, Ready: true, Reason: v1alpha1.TenantReasonFound},
-		}
-	}
-
-	// Poll any non-terminal class provision job to update its status
-	latestClassJob := provisioning.FindLatestJobByType(instance.Status.ClusterStorageJobs, v1alpha1.JobTypeProvision)
-	if latestClassJob != nil && !latestClassJob.State.IsTerminal() && r.ClusterStorageProvider != nil {
-		return provisioning.PollJob(ctx, r.ClusterStorageProvider, instance,
-			&provisioning.State{Jobs: &instance.Status.ClusterStorageJobs},
-			latestClassJob, r.StatusPollInterval, nil)
+		r.updateTenantVMaaSStorage(instance, clusterName, true, v1alpha1.TenantReasonFound)
 	}
 
 	// Stage 3: provision cluster-side storage on CaaS clusters owned by this tenant.
@@ -461,6 +496,22 @@ func (r *StorageReconciler) handleUpdate(ctx context.Context, instance *v1alpha1
 		if caasErr != nil || caasResult.RequeueAfter > 0 {
 			return caasResult, caasErr
 		}
+	}
+
+	// Poll any non-terminal class provision job to update its status.
+	// This runs after handleCaaSUpdate (Stage 3) so that CaaS cluster
+	// lifecycle management is never blocked by VMaaS job polling.
+	latestClassJob := provisioning.FindLatestJobByType(instance.Status.ClusterStorageJobs, v1alpha1.JobTypeProvision)
+	if latestClassJob != nil && !latestClassJob.State.IsTerminal() && r.ClusterStorageProvider != nil {
+		return provisioning.PollJob(ctx, r.ClusterStorageProvider, instance,
+			&provisioning.State{Jobs: &instance.Status.ClusterStorageJobs},
+			latestClassJob, r.StatusPollInterval, nil)
+	}
+
+	// Stage 4: Retry provisioning for any storage tiers that failed to resolve.
+	// This runs after handleCaaSUpdate to avoid blocking cluster lifecycle.
+	if hasMissingTiers {
+		return r.handleClusterStorageProvisioning(ctx, instance, hubSecretReady)
 	}
 
 	return ctrl.Result{}, nil
@@ -619,6 +670,12 @@ func (r *StorageReconciler) buildClientFromKubeconfig(kubeconfig []byte) (client
 	return c, nil
 }
 
+// updateTenantVMaaSStorage upserts the VMaaS target-cluster status while
+// preserving status entries for other clusters.
+func (r *StorageReconciler) updateTenantVMaaSStorage(tenant *v1alpha1.Tenant, clusterName string, ready bool, reason string) {
+	r.upsertTenantClusterStorage(tenant, clusterName, ready, reason)
+}
+
 // updateTenantClusterStorage adds or updates the CaaS cluster entry in
 // Tenant.status.clusterStorage without overwriting existing entries.
 func (r *StorageReconciler) updateTenantClusterStorage(tenant *v1alpha1.Tenant, co *v1alpha1.ClusterOrder) {
@@ -631,6 +688,12 @@ func (r *StorageReconciler) updateTenantClusterStorage(tenant *v1alpha1.Tenant, 
 		reason = cond.Reason
 	}
 
+	r.upsertTenantClusterStorage(tenant, clusterName, ready, reason)
+}
+
+// upsertTenantClusterStorage updates the status entry for clusterName or appends
+// one when that cluster is not yet represented.
+func (r *StorageReconciler) upsertTenantClusterStorage(tenant *v1alpha1.Tenant, clusterName string, ready bool, reason string) {
 	for i, cs := range tenant.Status.ClusterStorage {
 		if cs.ClusterName == clusterName {
 			tenant.Status.ClusterStorage[i].Ready = ready
@@ -656,7 +719,10 @@ func (r *StorageReconciler) handleDelete(ctx context.Context, instance *v1alpha1
 	// Resolved independently from handleUpdate's resolution (no caching between
 	// create and delete paths), before the first AAP-triggering call in this
 	// function, so every downstream call in this reconcile sees the same result.
-	ctx, _ = resolveAndInjectTierContext(ctx, r.TiersClient, r.BackendsClient, r.SecretsClient, "tenant", instance.Name)
+	ctx, _, tierErr := resolveAndInjectTierContext(ctx, r.TiersClient, r.BackendsClient, r.SecretsClient, "tenant", instance.Name)
+	if tierErr != nil {
+		log.Error(tierErr, "tier resolution failed during deletion", "tenant", instance.Name)
+	}
 
 	// CaaS cleanup: remove cluster-side storage (StorageClasses, CSI) from
 	// all CaaS clusters and remove our finalizer from their ClusterOrders.
@@ -667,9 +733,28 @@ func (r *StorageReconciler) handleDelete(ctx context.Context, instance *v1alpha1
 	// This runs independently of ClusterStorageProvider: when the
 	// HostedControlPlane is already gone the finalizer is removed without
 	// triggering AAP deprovisioning (OSAC-4340).
+	// handleCaaSDelete already guards against empty backend connections (OSAC-4855).
 	caasResult, caasErr := r.handleCaaSDelete(ctx, instance, true)
 	if caasErr != nil || caasResult.RequeueAfter > 0 {
 		return caasResult, caasErr
+	}
+
+	// Guard: when tier resolution failed, do not start or retry tenant
+	// deprovisioning AAP jobs — they would run without backend connections
+	// and fail. Retain the finalizer and requeue so the controller retries
+	// when the fulfillment service recovers, rather than orphaning backend
+	// resources. This differs from the handleCaaSDelete guard (OSAC-4855)
+	// which removes the CaaS finalizer because the cluster being destroyed
+	// makes resource cleanup moot; tenant-level resources (hub Secrets,
+	// StorageClasses on the target cluster) outlive the Tenant CR and must
+	// be cleaned up. When tier clients are nil (no fulfillment service
+	// configured), tierErr is nil and deprovisioning proceeds normally.
+	if tierErr != nil && (r.ClusterStorageProvider != nil || r.BackendProvider != nil) {
+		log.Info("tier resolution failed during deletion, retaining finalizer and requeueing",
+			"tenant", instance.Name, "retryAfter", r.StatusPollInterval)
+		r.Recorder.Eventf(instance, nil, corev1.EventTypeWarning, "TierResolutionFailed", "Teardown",
+			"Storage tier resolution failed during deletion, deferring deprovisioning: %v", tierErr)
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
 	}
 
 	// Stage 1: class cleanup
@@ -833,6 +918,18 @@ func (r *StorageReconciler) handleCaaSDelete(ctx context.Context, instance *v1al
 			// without attempting cleanup (OSAC-4340).
 			log.Info("no cluster storage provider configured, skipping CaaS cluster-side cleanup",
 				"clusterOrder", co.Name, "tenant", tenantName)
+		} else if len(provisioning.StorageBackendConnectionsFromContext(ctx)) == 0 {
+			// Backend connections are unavailable (fulfillment service down,
+			// tier resolution failed, or clients not configured). The AAP
+			// deprovisioning job would receive no credentials and fail, and
+			// BlockDeletionOnFailure would prevent finalizer removal,
+			// leaving the ClusterOrder stuck in Deleting. Skip the job and
+			// fall through to finalizer removal — the CaaS cluster is being
+			// torn down anyway (OSAC-4855).
+			log.Info("backend connections unavailable during CaaS teardown, skipping deprovisioning job",
+				"clusterOrder", co.Name, "tenant", tenantName)
+			r.Recorder.Eventf(co, nil, corev1.EventTypeWarning, "BackendConnectionsUnavailable", "Teardown",
+				"Storage backend connections could not be resolved during teardown, skipping deprovisioning job")
 		} else {
 			provCtx := provisioning.WithAdminKubeconfig(ctx, string(kubeconfig))
 
@@ -925,6 +1022,116 @@ func (r *StorageReconciler) handleBackendDeprovisioning(ctx context.Context, ins
 }
 
 // --- Helpers ---
+
+// storageBackendStatuses reports readiness for each unique backend referenced by
+// the resolved tier definitions. A TierDefinition represents the supported model
+// of one backend association per tier; multi-backend tiers are intentionally not
+// expanded here. When tier definitions are unavailable, the legacy any-Secret
+// check is retained for environments without Tier API data.
+func (r *StorageReconciler) storageBackendStatuses(ctx context.Context, tenantName string, tierDefinitions []provisioning.TierDefinition) ([]v1alpha1.StorageBackendStatus, bool, error) {
+	backendProviders := make(map[string]string)
+	for _, tier := range tierDefinitions {
+		if tier.BackendID != "" && tier.Provider != "" {
+			backendProviders[tier.BackendID] = tier.Provider
+		}
+	}
+
+	providerSecrets, anySecret, err := r.hubSecretsByProvider(ctx, tenantName)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(backendProviders) == 0 {
+		return nil, anySecret, nil
+	}
+
+	backendIDs := make([]string, 0, len(backendProviders))
+	for backendID := range backendProviders {
+		backendIDs = append(backendIDs, backendID)
+	}
+	sort.Strings(backendIDs)
+
+	statuses := make([]v1alpha1.StorageBackendStatus, 0, len(backendIDs))
+	allReady := true
+	for _, backendID := range backendIDs {
+		provider := backendProviders[backendID]
+		ready := providerSecrets[provider]
+
+		message := fmt.Sprintf("Hub Secret for tenant %q exists", tenantName)
+		if !ready {
+			message = fmt.Sprintf("Hub Secret for tenant %q not found", tenantName)
+			allReady = false
+		}
+		statuses = append(statuses, v1alpha1.StorageBackendStatus{
+			Name:     backendID,
+			Provider: provider,
+			Ready:    ready,
+			Message:  message,
+		})
+	}
+
+	return statuses, allReady, nil
+}
+
+// formatStorageBackendReadinessMessage summarizes backend readiness, falling
+// back to the legacy tenant-wide Secret result when backend details are absent.
+func formatStorageBackendReadinessMessage(statuses []v1alpha1.StorageBackendStatus, legacyHubSecretReady bool) string {
+	if len(statuses) == 0 {
+		fallbackResult := "no Secret found"
+		if legacyHubSecretReady {
+			fallbackResult = "found a Secret"
+		}
+		return fmt.Sprintf("No storage backend entries are available to evaluate (ready: 0; not ready: 0); legacy tenant-wide Hub Secret check: %s", fallbackResult)
+	}
+
+	ready := make([]string, 0, len(statuses))
+	notReady := make([]string, 0, len(statuses))
+	for _, backend := range statuses {
+		backendAndProvider := fmt.Sprintf("%s: %s", backend.Name, backend.Provider)
+		if backend.Ready {
+			ready = append(ready, backendAndProvider)
+		} else {
+			notReady = append(notReady, backendAndProvider)
+		}
+	}
+	sort.Strings(ready)
+	sort.Strings(notReady)
+
+	readyNames := "none"
+	if len(ready) > 0 {
+		readyNames = strings.Join(ready, ", ")
+	}
+	notReadyNames := "none"
+	if len(notReady) > 0 {
+		notReadyNames = strings.Join(notReady, ", ")
+	}
+
+	message := fmt.Sprintf("Hub Secret readiness by backend: ready (%d): %s; not ready (%d): %s", len(ready), readyNames, len(notReady), notReadyNames)
+	if len(ready) == 0 {
+		message += "; no backend Hub Secrets are ready"
+	}
+	return message
+}
+
+// hubSecretsByProvider lists a tenant's Hub Secrets and reports readiness by
+// provider together with whether any matching Secret exists.
+func (r *StorageReconciler) hubSecretsByProvider(ctx context.Context, tenantName string) (map[string]bool, bool, error) {
+	labels := map[string]string{osacTenantKey: tenantName}
+	var secretList corev1.SecretList
+	if err := r.List(ctx, &secretList,
+		client.InNamespace(storageConfigNamespace()),
+		client.MatchingLabels(labels),
+	); err != nil {
+		return nil, false, err
+	}
+
+	providers := make(map[string]bool)
+	for _, secret := range secretList.Items {
+		if provider := secret.Labels[osacStorageProviderLabel]; provider != "" {
+			providers[provider] = true
+		}
+	}
+	return providers, len(secretList.Items) > 0, nil
+}
 
 func (r *StorageReconciler) hubSecretExists(ctx context.Context, tenantName string, provider string) (bool, error) {
 	labels := map[string]string{osacTenantKey: tenantName}

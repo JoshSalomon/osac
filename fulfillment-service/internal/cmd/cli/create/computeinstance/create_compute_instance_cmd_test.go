@@ -65,6 +65,16 @@ var _ = Describe("parseNetworkAttachmentFlag", func() {
 // Legacy subnet and security-groups tests removed - these fields are no longer supported
 
 var _ = Describe("buildSpec", func() {
+	It("should populate a registered SSH key reference from the flag", func() {
+		c := &runnerContext{}
+		c.args.sshKey = "login-key"
+
+		spec, err := c.buildSpec("tmpl", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(spec.GetSshKey().GetName()).To(Equal("login-key"))
+		Expect(spec.GetSshKey().GetId()).To(BeEmpty())
+	})
+
 	It("should send the resolved instance type ID", func() {
 		c := &runnerContext{}
 		c.args.instanceType = "instance-type-id"
@@ -239,6 +249,12 @@ var _ = Describe("Create computeinstance flag registration", func() {
 		flag := cmd.Flags().Lookup("disk-image")
 		Expect(flag).NotTo(BeNil())
 	})
+
+	It("should register --ssh-key and not the removed inline key flag", func() {
+		cmd := Cmd()
+		Expect(cmd.Flags().Lookup("ssh-key")).NotTo(BeNil())
+		Expect(cmd.Flags().Lookup("ssh-public-key")).To(BeNil())
+	})
 })
 
 var _ = Describe("Create computeinstance flag validation", func() {
@@ -334,15 +350,25 @@ var _ = Describe("--additional-disk flag parsing", func() {
 		return val.GetSlice()
 	}
 
+	It("should preserve an explicitly empty value to opt out of catalog defaults", func() {
+		raw := rawDisks("--additional-disk", "")
+		Expect(raw).To(Equal([]string{""}))
+
+		disks, err := parseAdditionalDisks(raw)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(disks).NotTo(BeNil())
+		Expect(disks.GetItems()).To(BeEmpty())
+	})
+
 	It("should keep a single comma-joined key=value spec as one element", func() {
 		raw := rawDisks("--additional-disk", "size=50,storage-tier=e2e-x")
 		Expect(raw).To(Equal([]string{"size=50,storage-tier=e2e-x"}))
 
 		disks, err := parseAdditionalDisks(raw)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(disks).To(HaveLen(1))
-		Expect(disks[0].GetSizeGib()).To(Equal(int32(50)))
-		Expect(disks[0].GetStorageTier().GetName()).To(Equal("e2e-x"))
+		Expect(disks.GetItems()).To(HaveLen(1))
+		Expect(disks.GetItems()[0].GetSizeGib()).To(Equal(int32(50)))
+		Expect(disks.GetItems()[0].GetStorageTier().GetName()).To(Equal("e2e-x"))
 	})
 
 	It("should parse multiple disks with different storage tiers", func() {
@@ -357,11 +383,11 @@ var _ = Describe("--additional-disk flag parsing", func() {
 
 		disks, err := parseAdditionalDisks(raw)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(disks).To(HaveLen(2))
-		Expect(disks[0].GetSizeGib()).To(Equal(int32(50)))
-		Expect(disks[0].GetStorageTier().GetName()).To(Equal("fast"))
-		Expect(disks[1].GetSizeGib()).To(Equal(int32(100)))
-		Expect(disks[1].GetStorageTier().GetName()).To(Equal("archive"))
+		Expect(disks.GetItems()).To(HaveLen(2))
+		Expect(disks.GetItems()[0].GetSizeGib()).To(Equal(int32(50)))
+		Expect(disks.GetItems()[0].GetStorageTier().GetName()).To(Equal("fast"))
+		Expect(disks.GetItems()[1].GetSizeGib()).To(Equal(int32(100)))
+		Expect(disks.GetItems()[1].GetStorageTier().GetName()).To(Equal("archive"))
 	})
 
 	It("should reject a bare integer additional disk", func() {

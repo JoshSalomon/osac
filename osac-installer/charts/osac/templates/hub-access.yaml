@@ -34,6 +34,7 @@ rules:
       - externalipattachments
       - externalippools
       - externalips
+      - fabricdomains
       - natgateways
       - securitygroups
       - subnets
@@ -57,6 +58,7 @@ rules:
       - externalipattachments/status
       - externalippools/status
       - externalips/status
+      - fabricdomains/status
       - natgateways/status
       - securitygroups/status
       - subnets/status
@@ -80,6 +82,7 @@ rules:
       - secrets
     verbs:
       - create
+      - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

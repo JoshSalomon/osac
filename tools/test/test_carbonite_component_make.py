@@ -37,6 +37,9 @@ class ComponentImageTargetsTest(unittest.TestCase):
         self.devstack.mkdir(parents=True)
         shutil.copyfile(ROOT / "osac-operator/Makefile", self.operator / "Makefile")
         shutil.copyfile(ROOT / "osac-installer/charts/osac-devstack/Makefile", self.devstack / "Makefile")
+        kind_load = self.root / "osac-installer/scripts/dev-full/kind-load-image.mk"
+        kind_load.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "osac-installer/scripts/dev-full/kind-load-image.mk", kind_load)
 
     def helper(self):
         helper = self.root / "tools/carbonite/host-build"

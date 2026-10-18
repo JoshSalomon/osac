@@ -19,6 +19,10 @@ class ImageBuildDispatchTest(unittest.TestCase):
         self.component = self.root / "fulfillment-service"
         self.component.mkdir()
         shutil.copyfile(MAKEFILE, self.component / "Makefile")
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        kind_load = self.root / "osac-installer/scripts/dev-full/kind-load-image.mk"
+        kind_load.parent.mkdir(parents=True)
+        shutil.copyfile(MAKEFILE.parents[1] / "osac-installer/scripts/dev-full/kind-load-image.mk", kind_load)
         self.log = self.root / "calls"
         self.bin = self.root / "bin"
         self.bin.mkdir()

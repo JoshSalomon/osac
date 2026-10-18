@@ -14,6 +14,8 @@ language governing permissions and limitations under the License.
 package computeinstance
 
 //go:generate mockgen -destination=compute_instances_client_mock.go -package=computeinstance github.com/osac-project/osac/proto/gen/osac/private/v1 ComputeInstancesClient
+//go:generate mockgen -destination=external_ips_client_mock.go -package=computeinstance github.com/osac-project/osac/proto/gen/osac/private/v1 ExternalIPsClient
+//go:generate mockgen -destination=external_ip_attachments_client_mock.go -package=computeinstance github.com/osac-project/osac/proto/gen/osac/private/v1 ExternalIPAttachmentsClient
 //go:generate mockgen -destination=instance_types_client_mock.go -package=computeinstance github.com/osac-project/osac/proto/gen/osac/private/v1 InstanceTypesClient
 //go:generate mockgen -destination=disk_images_client_mock.go -package=computeinstance github.com/osac-project/osac/proto/gen/osac/private/v1 DiskImagesClient
 //go:generate mockgen -destination=secrets_client_mock.go -package=computeinstance github.com/osac-project/osac/proto/gen/osac/private/v1 SecretsClient
@@ -24,12 +26,16 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"slices"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clnt "sigs.k8s.io/controller-runtime/pkg/client"
@@ -62,6 +68,22 @@ const userDataSecretKey = "userdata"
 // instance's state untouched so it doesn't look like a permanent failure while it is retried.
 var errTransientK8sError = errors.New("transient kubernetes error")
 
+// SecretResolutionError classifies a failure while resolving the Secret referenced
+// by the ComputeInstance SSH key field.
+type SecretResolutionError struct {
+	Permanent bool
+	Reason    string
+	Err       error
+}
+
+func (e *SecretResolutionError) Error() string {
+	return fmt.Sprintf("failed to resolve SSH public key Secret: %v", e.Err)
+}
+
+func (e *SecretResolutionError) Unwrap() error {
+	return e.Err
+}
+
 // FunctionBuilder contains the data and logic needed to build a function that reconciles compute instances.
 type FunctionBuilder struct {
 	logger     *slog.Logger
@@ -70,14 +92,17 @@ type FunctionBuilder struct {
 }
 
 type function struct {
-	logger                 *slog.Logger
-	hubCache               controllers.HubCache
-	computeInstancesClient privatev1.ComputeInstancesClient
-	hubsClient             privatev1.HubsClient
-	instanceTypesClient    privatev1.InstanceTypesClient
-	diskImagesClient       privatev1.DiskImagesClient
-	secretsClient          privatev1.SecretsClient
-	maskCalculator         *masks.Calculator
+	logger                      *slog.Logger
+	hubCache                    controllers.HubCache
+	networkingHubReader         controllers.NetworkingHubReader
+	computeInstancesClient      privatev1.ComputeInstancesClient
+	externalIPsClient           privatev1.ExternalIPsClient
+	externalIPAttachmentsClient privatev1.ExternalIPAttachmentsClient
+	hubsClient                  privatev1.HubsClient
+	instanceTypesClient         privatev1.InstanceTypesClient
+	diskImagesClient            privatev1.DiskImagesClient
+	secretsClient               privatev1.SecretsClient
+	maskCalculator              *masks.Calculator
 }
 
 type task struct {
@@ -130,14 +155,23 @@ func (b *FunctionBuilder) Build() (result controllers.ReconcilerFunction[*privat
 
 	// Create and populate the object:
 	object := &function{
-		logger:                 b.logger,
-		computeInstancesClient: privatev1.NewComputeInstancesClient(b.connection),
-		hubsClient:             privatev1.NewHubsClient(b.connection),
-		instanceTypesClient:    privatev1.NewInstanceTypesClient(b.connection),
-		diskImagesClient:       privatev1.NewDiskImagesClient(b.connection),
-		secretsClient:          privatev1.NewSecretsClient(b.connection),
-		hubCache:               b.hubCache,
-		maskCalculator:         masks.NewCalculator().Build(),
+		logger:                      b.logger,
+		computeInstancesClient:      privatev1.NewComputeInstancesClient(b.connection),
+		externalIPsClient:           privatev1.NewExternalIPsClient(b.connection),
+		externalIPAttachmentsClient: privatev1.NewExternalIPAttachmentsClient(b.connection),
+		hubsClient:                  privatev1.NewHubsClient(b.connection),
+		instanceTypesClient:         privatev1.NewInstanceTypesClient(b.connection),
+		diskImagesClient:            privatev1.NewDiskImagesClient(b.connection),
+		secretsClient:               privatev1.NewSecretsClient(b.connection),
+		hubCache:                    b.hubCache,
+		maskCalculator:              masks.NewCalculator().Build(),
+	}
+	object.networkingHubReader, err = controllers.NewNetworkingHubReader().
+		SetNetworkClassesClient(privatev1.NewNetworkClassesClient(b.connection)).
+		SetHubCache(b.hubCache).
+		Build()
+	if err != nil {
+		return nil, err
 	}
 	result = object.run
 	return
@@ -155,8 +189,31 @@ func (r *function) run(ctx context.Context, computeInstance *privatev1.ComputeIn
 	} else {
 		reconcileErr = t.update(ctx)
 	}
-	if reconcileErr != nil && !errors.Is(reconcileErr, errTransientK8sError) {
-		t.setReconciliationFailed(reconcileErr)
+	var hubResolutionRetryErr error
+	if reconcileErr != nil {
+		handled, retry := controllers.HandleResourceNetworkingHubResolutionError(reconcileErr, t.setPending, t.setFailed)
+		if handled {
+			if retry {
+				hubResolutionRetryErr = reconcileErr
+			}
+			reconcileErr = nil
+		}
+	}
+	if reconcileErr != nil {
+		var secretErr *SecretResolutionError
+		if errors.As(reconcileErr, &secretErr) {
+			if secretErr.Permanent {
+				t.setReconciliationFailedWithReason(secretErr.Err, secretErr.Reason)
+			} else {
+				// Resolution failures are retried without changing API status or creating
+				// a Kubernetes object. Restore the input so defaults and hub selection do
+				// not turn a transient lookup failure into a persisted mutation.
+				proto.Reset(computeInstance)
+				proto.Merge(computeInstance, oldComputeInstance)
+			}
+		} else if !errors.Is(reconcileErr, errTransientK8sError) {
+			t.setReconciliationFailed(reconcileErr)
+		}
 	}
 	// Calculate which fields the reconciler actually modified and use a field mask
 	// to update only those fields. This prevents overwriting concurrent user changes.
@@ -180,7 +237,10 @@ func (r *function) run(ctx context.Context, computeInstance *privatev1.ComputeIn
 		}
 		return reconcileErr
 	}
-	return updateErr
+	if updateErr != nil {
+		return updateErr
+	}
+	return hubResolutionRetryErr
 }
 
 func (t *task) update(ctx context.Context) error {
@@ -221,7 +281,7 @@ func (t *task) update(ctx context.Context) error {
 	}
 
 	// Prepare the changes to the spec:
-	spec, err := t.buildSpec(ctx)
+	spec, err := t.buildSpecWithNetworkAttachments(ctx, object == nil)
 	if err != nil {
 		return err
 	}
@@ -259,6 +319,15 @@ func (t *task) update(ctx context.Context) error {
 			slog.String("name", object.GetName()),
 		)
 	} else {
+		var desiredNetworkSpec osacv1alpha1.ComputeInstanceSpec
+		if networkErr := t.buildSpecNetworkAttachments(ctx, &desiredNetworkSpec); networkErr != nil {
+			t.r.logger.WarnContext(ctx, "Failed to resolve private network attachments; preserving stored network attachments on existing ComputeInstance",
+				slog.String("namespace", object.GetNamespace()), slog.String("name", object.GetName()), slog.Any("error", networkErr))
+		} else if !equalNetworkAttachments(object.Spec.NetworkAttachments, desiredNetworkSpec.NetworkAttachments) {
+			t.r.logger.WarnContext(ctx, "Private and stored network attachments differ; preserving stored network attachments on existing ComputeInstance",
+				slog.String("namespace", object.GetNamespace()), slog.String("name", object.GetName()))
+		}
+		spec.NetworkAttachments = object.Spec.NetworkAttachments
 		update := object.DeepCopy()
 		update.Spec = spec
 		err = t.hubClient.Patch(ctx, update, clnt.MergeFrom(object))
@@ -281,7 +350,7 @@ func (t *task) update(ctx context.Context) error {
 		return err
 	}
 
-	return nil
+	return t.reconcileAutoExternalIPAttachment(ctx)
 }
 
 func (t *task) setDefaults() {
@@ -322,6 +391,17 @@ func (t *task) validateTenant() error {
 }
 
 func (t *task) delete(ctx context.Context) (err error) {
+	// ExternalIPAttachment must finish detaching before its ExternalIP can be released.
+	// Keep the ComputeInstance finalizer until both resources are absent, then continue
+	// with the Kubernetes ComputeInstance cleanup below.
+	cleanedUp, cleanupErr := t.cleanupAutoExternalIPResources(ctx)
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+	if !cleanedUp {
+		return nil
+	}
+
 	// Do nothing if we don't know the hub yet:
 	t.hubId = t.computeInstance.GetStatus().GetHub()
 	if t.hubId == "" {
@@ -382,8 +462,254 @@ func (t *task) delete(ctx context.Context) (err error) {
 	return
 }
 
+func (t *task) reconcileAutoExternalIPAttachment(ctx context.Context) error {
+	ci := t.computeInstance
+	if !ci.GetSpec().GetAutoExternalIpAttachment() || !computeInstanceReadyForExternalIPAttachment(ci) {
+		return nil
+	}
+	if t.r.externalIPAttachmentsClient == nil {
+		return errors.New("ExternalIPAttachment client is not configured")
+	}
+
+	attachmentFilter := computeInstanceExternalIPAttachmentFilter(ci)
+	attachments, err := t.r.externalIPAttachmentsClient.List(ctx, privatev1.ExternalIPAttachmentsListRequest_builder{
+		Filter: &attachmentFilter,
+		Limit:  new(int32(1000)),
+	}.Build())
+	if err != nil {
+		return fmt.Errorf("failed to list ExternalIPAttachments for ComputeInstance '%s': %w", ci.GetId(), err)
+	}
+	if len(attachments.GetItems()) > 0 {
+		// Any existing attachment wins. This makes reconciliation idempotent and avoids
+		// replacing a user-created attachment with an automatically managed one.
+		return nil
+	}
+	if attachments.GetTotal() > 0 {
+		return fmt.Errorf("ExternalIPAttachment list for ComputeInstance '%s' was incomplete", ci.GetId())
+	}
+	if t.r.externalIPsClient == nil {
+		return errors.New("ExternalIP client is not configured")
+	}
+
+	eipFilter := autoCreatedExternalIPFilter(ci.GetMetadata().GetTenant(), ci.GetId())
+	eips, err := t.r.externalIPsClient.List(ctx, privatev1.ExternalIPsListRequest_builder{
+		Filter: &eipFilter,
+		Limit:  new(int32(1000)),
+	}.Build())
+	if err != nil {
+		return fmt.Errorf("failed to list auto-created ExternalIPs for ComputeInstance '%s': %w", ci.GetId(), err)
+	}
+	if int(eips.GetTotal()) > len(eips.GetItems()) {
+		return fmt.Errorf("ExternalIP list for ComputeInstance '%s' was incomplete", ci.GetId())
+	}
+	if len(eips.GetItems()) == 0 {
+		return nil
+	}
+	if len(eips.GetItems()) != 1 {
+		return fmt.Errorf("expected one auto-created ExternalIP for ComputeInstance '%s', found %d", ci.GetId(), len(eips.GetItems()))
+	}
+	eip := eips.GetItems()[0]
+	if eip.GetStatus().GetState() != privatev1.ExternalIPState_EXTERNAL_IP_STATE_ALLOCATED || eip.GetStatus().GetAddress() == "" {
+		return nil
+	}
+	if eip.GetStatus().GetAttached() {
+		return fmt.Errorf("auto-created ExternalIP '%s' is already attached before its ComputeInstance attachment was reconciled", eip.GetId())
+	}
+	if eip.GetMetadata().GetAnnotations()[annotations.OwnerReference] != ci.GetId() {
+		return fmt.Errorf("auto-created ExternalIP '%s' is not owned by ComputeInstance '%s'", eip.GetId(), ci.GetId())
+	}
+
+	shortID := ci.GetId()
+	if len(shortID) > 53 {
+		shortID = shortID[:53]
+	}
+	attachment := privatev1.ExternalIPAttachment_builder{
+		Metadata: privatev1.Metadata_builder{
+			Name:    "auto-eipa-" + shortID,
+			Tenant:  ci.GetMetadata().GetTenant(),
+			Creator: "system",
+			Labels: map[string]string{
+				labels.AutoCreated:    "true",
+				labels.AutoCreatedFor: ci.GetId(),
+			},
+			Annotations: map[string]string{
+				annotations.OwnerReference: ci.GetId(),
+			},
+		}.Build(),
+		Spec: privatev1.ExternalIPAttachmentSpec_builder{
+			ExternalIp:      &privatev1.ExternalIPLocalReference{Id: eip.GetId()},
+			ComputeInstance: &privatev1.ComputeInstanceLocalReference{Id: ci.GetId()},
+		}.Build(),
+	}.Build()
+	_, err = t.r.externalIPAttachmentsClient.Create(ctx, privatev1.ExternalIPAttachmentsCreateRequest_builder{
+		Object: attachment,
+	}.Build())
+	if status.Code(err) == codes.AlreadyExists {
+		// A parallel reconcile may have created the same attachment after our list.
+		attachments, listErr := t.r.externalIPAttachmentsClient.List(ctx, privatev1.ExternalIPAttachmentsListRequest_builder{
+			Filter: &attachmentFilter,
+			Limit:  new(int32(1000)),
+		}.Build())
+		if listErr != nil {
+			return fmt.Errorf("ExternalIPAttachment already exists but could not be looked up: %w", listErr)
+		}
+		if len(attachments.GetItems()) == 0 {
+			return fmt.Errorf("ExternalIPAttachment already exists but none targets ComputeInstance '%s'", ci.GetId())
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to create ExternalIPAttachment for ComputeInstance '%s': %w", ci.GetId(), err)
+	}
+	return nil
+}
+
+func computeInstanceReadyForExternalIPAttachment(ci *privatev1.ComputeInstance) bool {
+	if ci.GetStatus().GetState() != privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_RUNNING {
+		return false
+	}
+	ready := false
+	for _, condition := range ci.GetStatus().GetConditions() {
+		if condition.GetType() == privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_READY {
+			ready = condition.GetStatus() == privatev1.ConditionStatus_CONDITION_STATUS_TRUE
+			break
+		}
+	}
+	if !ready || len(ci.GetSpec().GetNetworkAttachments()) != 1 || len(ci.GetStatus().GetComputeNetworkAttachmentStatuses()) != 1 {
+		return false
+	}
+
+	specAttachment := ci.GetSpec().GetNetworkAttachments()[0]
+	statusAttachment := ci.GetStatus().GetComputeNetworkAttachmentStatuses()[0]
+	attachmentIP := net.ParseIP(statusAttachment.GetIpAddress())
+	return specAttachment.GetSubnet().GetId() != "" &&
+		statusAttachment.GetSubnetRef() == specAttachment.GetSubnet().GetId() &&
+		attachmentIP != nil && attachmentIP.To4() != nil
+}
+
+func computeInstanceExternalIPAttachmentFilter(ci *privatev1.ComputeInstance) string {
+	filter := fmt.Sprintf(
+		"this.metadata.tenant == %q && this.spec.compute_instance.id == %q",
+		ci.GetMetadata().GetTenant(), ci.GetId(),
+	)
+	if ci.GetMetadata().GetName() != "" {
+		filter += fmt.Sprintf(" || (this.metadata.tenant == %q && this.spec.compute_instance.name == %q)",
+			ci.GetMetadata().GetTenant(), ci.GetMetadata().GetName())
+	}
+	return filter
+}
+
+func autoCreatedExternalIPFilter(tenant, ciID string) string {
+	return fmt.Sprintf(
+		"this.metadata.tenant == %q && this.metadata.labels[%q] == %q && this.metadata.labels[%q] == %q",
+		tenant, labels.AutoCreated, "true", labels.AutoCreatedFor, ciID,
+	)
+}
+
+func (t *task) cleanupAutoExternalIPResources(ctx context.Context) (bool, error) {
+	ci := t.computeInstance
+	if !ci.GetSpec().GetAutoExternalIpAttachment() {
+		return true, nil
+	}
+	if t.r.externalIPAttachmentsClient == nil || t.r.externalIPsClient == nil {
+		return false, errors.New("ExternalIP clients are not configured")
+	}
+
+	attachmentFilter := computeInstanceExternalIPAttachmentFilter(ci)
+	attachments, err := t.r.externalIPAttachmentsClient.List(ctx, privatev1.ExternalIPAttachmentsListRequest_builder{
+		Filter: &attachmentFilter,
+		Limit:  new(int32(1000)),
+	}.Build())
+	if err != nil {
+		return false, fmt.Errorf("failed to list ExternalIPAttachments for ComputeInstance '%s': %w", ci.GetId(), err)
+	}
+	if int(attachments.GetTotal()) > len(attachments.GetItems()) {
+		return false, fmt.Errorf("ExternalIPAttachment list for ComputeInstance '%s' was incomplete", ci.GetId())
+	}
+	for _, attachment := range attachments.GetItems() {
+		if attachment.GetMetadata().GetLabels()[labels.AutoCreated] != "true" ||
+			attachment.GetMetadata().GetAnnotations()[annotations.OwnerReference] != ci.GetId() {
+			t.r.logger.WarnContext(ctx, "ComputeInstance deletion is waiting for a manually managed ExternalIPAttachment",
+				slog.String("compute_instance_id", ci.GetId()), slog.String("external_ip_attachment_id", attachment.GetId()))
+			return false, nil
+		}
+	}
+	waitingForAttachments := false
+	for _, attachment := range attachments.GetItems() {
+		if attachment.GetMetadata().HasDeletionTimestamp() {
+			waitingForAttachments = true
+			continue
+		}
+		_, deleteErr := t.r.externalIPAttachmentsClient.Delete(ctx, privatev1.ExternalIPAttachmentsDeleteRequest_builder{
+			Id: attachment.GetId(),
+		}.Build())
+		if status.Code(deleteErr) == codes.NotFound {
+			continue
+		}
+		if deleteErr != nil {
+			return false, fmt.Errorf("failed to delete ExternalIPAttachment '%s': %w", attachment.GetId(), deleteErr)
+		}
+		waitingForAttachments = true
+	}
+	if waitingForAttachments {
+		return false, nil
+	}
+
+	eipFilter := autoCreatedExternalIPFilter(ci.GetMetadata().GetTenant(), ci.GetId())
+	eips, err := t.r.externalIPsClient.List(ctx, privatev1.ExternalIPsListRequest_builder{
+		Filter: &eipFilter,
+		Limit:  new(int32(1000)),
+	}.Build())
+	if err != nil {
+		return false, fmt.Errorf("failed to list auto-created ExternalIPs for ComputeInstance '%s': %w", ci.GetId(), err)
+	}
+	if int(eips.GetTotal()) > len(eips.GetItems()) {
+		return false, fmt.Errorf("ExternalIP list for ComputeInstance '%s' was incomplete", ci.GetId())
+	}
+	waitingForEIPs := false
+	for _, eip := range eips.GetItems() {
+		if eip.GetMetadata().GetLabels()[labels.AutoCreated] != "true" ||
+			eip.GetMetadata().GetLabels()[labels.AutoCreatedFor] != ci.GetId() ||
+			eip.GetMetadata().GetAnnotations()[annotations.OwnerReference] != ci.GetId() {
+			return false, fmt.Errorf("auto-created ExternalIP '%s' is not owned by ComputeInstance '%s'", eip.GetId(), ci.GetId())
+		}
+		if eip.GetStatus().GetAttached() || eip.GetMetadata().HasDeletionTimestamp() {
+			waitingForEIPs = true
+			continue
+		}
+		_, deleteErr := t.r.externalIPsClient.Delete(ctx, privatev1.ExternalIPsDeleteRequest_builder{
+			Id: eip.GetId(),
+		}.Build())
+		if status.Code(deleteErr) == codes.NotFound {
+			continue
+		}
+		if deleteErr != nil {
+			return false, fmt.Errorf("failed to delete ExternalIP '%s': %w", eip.GetId(), deleteErr)
+		}
+		waitingForEIPs = true
+	}
+	if waitingForEIPs {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (t *task) selectHub(ctx context.Context) error {
 	t.hubId = t.computeInstance.GetStatus().GetHub()
+	if len(t.computeInstance.GetSpec().GetNetworkAttachments()) > 0 {
+		if t.r.networkingHubReader == nil {
+			return controllers.ErrCanonicalHubUnavailable
+		}
+		resolution, err := controllers.ResolveResourceNetworkingHub(ctx, t.r.networkingHubReader, t.hubId)
+		if err != nil {
+			return err
+		}
+		t.hubId = resolution.HubID
+		t.hubNamespace = resolution.Namespace
+		t.hubClient = resolution.Client
+		t.r.logger.DebugContext(ctx, "Selected canonical networking hub", slog.String("id", t.hubId))
+		return nil
+	}
 	if t.hubId == "" {
 		response, err := t.r.hubsClient.List(ctx, privatev1.HubsListRequest_builder{}.Build())
 		if err != nil {
@@ -542,6 +868,18 @@ func (t *task) setFailed(err error) {
 	)
 }
 
+func (t *task) setPending(err error) {
+	if !t.computeInstance.HasStatus() {
+		t.computeInstance.SetStatus(&privatev1.ComputeInstanceStatus{})
+	}
+	t.updateCondition(
+		privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_PROVISIONED,
+		privatev1.ConditionStatus_CONDITION_STATUS_FALSE,
+		"ResourcesUnavailable",
+		err.Error(),
+	)
+}
+
 // updateCondition updates or creates a condition with the specified type, status, reason, and message.
 func (t *task) updateCondition(conditionType privatev1.ComputeInstanceConditionType, status privatev1.ConditionStatus,
 	reason string, message string) {
@@ -571,6 +909,10 @@ func (t *task) updateCondition(conditionType privatev1.ComputeInstanceConditionT
 }
 
 func (t *task) setReconciliationFailed(err error) {
+	t.setReconciliationFailedWithReason(err, "ReconciliationFailed")
+}
+
+func (t *task) setReconciliationFailedWithReason(err error, reason string) {
 	if !t.computeInstance.HasStatus() {
 		t.computeInstance.SetStatus(&privatev1.ComputeInstanceStatus{})
 	}
@@ -582,7 +924,7 @@ func (t *task) setReconciliationFailed(err error) {
 	t.updateCondition(
 		privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_PROVISIONED,
 		privatev1.ConditionStatus_CONDITION_STATUS_FALSE,
-		"ReconciliationFailed",
+		reason,
 		err.Error(),
 	)
 }
@@ -590,6 +932,10 @@ func (t *task) setReconciliationFailed(err error) {
 // buildSpec constructs the spec for the Kubernetes ComputeInstance object based on the
 // compute instance from the database.
 func (t *task) buildSpec(ctx context.Context) (osacv1alpha1.ComputeInstanceSpec, error) {
+	return t.buildSpecWithNetworkAttachments(ctx, true)
+}
+
+func (t *task) buildSpecWithNetworkAttachments(ctx context.Context, includeNetworkAttachments bool) (osacv1alpha1.ComputeInstanceSpec, error) {
 	templateParameters, err := utils.ConvertTemplateParametersToJSON(t.computeInstance.GetSpec().GetTemplateParameters())
 	if err != nil {
 		return osacv1alpha1.ComputeInstanceSpec{}, err
@@ -610,13 +956,22 @@ func (t *task) buildSpec(ctx context.Context) (osacv1alpha1.ComputeInstanceSpec,
 		return osacv1alpha1.ComputeInstanceSpec{}, err
 	}
 
-	// Handle network_attachments (required)
-	err = t.buildSpecNetworkAttachments(ctx, &spec)
-	if err != nil {
-		return osacv1alpha1.ComputeInstanceSpec{}, err
+	if includeNetworkAttachments {
+		// Handle network_attachments (required)
+		err = t.buildSpecNetworkAttachments(ctx, &spec)
+		if err != nil {
+			return osacv1alpha1.ComputeInstanceSpec{}, err
+		}
 	}
 
 	return spec, nil
+}
+
+func equalNetworkAttachments(left, right []osacv1alpha1.ComputeNetworkAttachment) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	return apiequality.Semantic.DeepEqual(left, right)
 }
 
 // buildSpecNetworkAttachments handles the network_attachments field.
@@ -727,8 +1082,38 @@ func (t *task) addExplicitFields(ctx context.Context, spec *osacv1alpha1.Compute
 			spec.RunStrategy = osacv1alpha1.RunStrategyHalted
 		}
 	}
-	if ciSpec.HasSshPublicKey() {
-		spec.SSHKey = ciSpec.GetSshPublicKey()
+	if sshKeyRef := ciSpec.GetSshKey(); sshKeyRef != nil {
+		if sshKeyRef.GetId() == "" {
+			return &SecretResolutionError{
+				Permanent: true,
+				Reason:    "SecretInvalid",
+				Err:       status.Error(codes.InvalidArgument, "ComputeInstance SSH key Secret reference has no id"),
+			}
+		}
+		response, secretErr := t.r.secretsClient.Get(ctx, privatev1.SecretsGetRequest_builder{
+			Id: sshKeyRef.GetId(),
+		}.Build())
+		if secretErr != nil {
+			code := status.Code(secretErr)
+			resolutionErr := &SecretResolutionError{Err: secretErr}
+			switch code {
+			case codes.NotFound:
+				resolutionErr.Permanent = true
+				resolutionErr.Reason = "SecretNotFound"
+			case codes.InvalidArgument:
+				resolutionErr.Permanent = true
+				resolutionErr.Reason = "SecretInvalid"
+			}
+			return resolutionErr
+		}
+		if response == nil || response.GetObject() == nil {
+			return &SecretResolutionError{
+				Err: status.Error(codes.Unknown, "Secrets.Get returned no object"),
+			}
+		}
+		secret := response.GetObject()
+		publicKey := secret.GetData()["public_key"]
+		spec.SSHKey = string(publicKey)
 	}
 	if t.userDataSecretName != "" {
 		spec.UserDataSecretRef = &corev1.LocalObjectReference{
@@ -757,15 +1142,15 @@ func (t *task) addExplicitFields(ctx context.Context, spec *osacv1alpha1.Compute
 			StorageTier: ciSpec.GetBootDisk().GetStorageTier().GetName(),
 		}
 	}
-	if len(ciSpec.GetAdditionalDisks()) > 0 {
-		disks := make([]osacv1alpha1.DiskSpec, 0, len(ciSpec.GetAdditionalDisks()))
-		for _, disk := range ciSpec.GetAdditionalDisks() {
-			disks = append(disks, osacv1alpha1.DiskSpec{
+	if disks := ciSpec.GetAdditionalDisks().GetItems(); len(disks) > 0 {
+		operatorDisks := make([]osacv1alpha1.DiskSpec, 0, len(disks))
+		for _, disk := range disks {
+			operatorDisks = append(operatorDisks, osacv1alpha1.DiskSpec{
 				SizeGiB:     disk.GetSizeGib(),
 				StorageTier: disk.GetStorageTier().GetName(),
 			})
 		}
-		spec.AdditionalDisks = disks
+		spec.AdditionalDisks = operatorDisks
 	}
 
 	return nil

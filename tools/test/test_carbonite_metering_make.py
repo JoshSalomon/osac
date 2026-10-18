@@ -36,6 +36,9 @@ class MeteringImageDispatchTest(unittest.TestCase):
         shared = self.root / "tools"
         shared.mkdir()
         shutil.copyfile(REPO / "tools/golangci-lint.mk", shared / "golangci-lint.mk")
+        kind_load = self.root / "osac-installer/scripts/dev-full/kind-load-image.mk"
+        kind_load.parent.mkdir(parents=True)
+        shutil.copyfile(REPO / "osac-installer/scripts/dev-full/kind-load-image.mk", kind_load)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for engine in ("podman", "docker"):
@@ -118,8 +121,8 @@ class MeteringImageDispatchTest(unittest.TestCase):
     def test_host_and_distrobox_keep_direct_engine_recipes(self):
         cases = (
             (SERVICE, "image-build", "ghcr.io/osac-project/metering-service:latest", "Containerfile", "../.."),
-            (ADAPTERS, "image-build-m360-adapter", "ghcr.io/osac-project/metering-m360-adapter:latest", "Containerfile.m360-adapter", ".."),
-            (ADAPTERS, "image-build-echo-adapter", "ghcr.io/osac-project/metering-echo-adapter:latest", "Containerfile.echo-adapter", ".."),
+            (ADAPTERS, "image-build-m360-adapter", "ghcr.io/osac-project/metering-m360-adapter:latest", "Containerfile.m360-adapter", "../.."),
+            (ADAPTERS, "image-build-echo-adapter", "ghcr.io/osac-project/metering-echo-adapter:latest", "Containerfile.echo-adapter", "../.."),
         )
         for component, target, tag, containerfile, context in cases:
             for project_dir in (False, True):

@@ -53,6 +53,16 @@ linters:
       - linters:
           - errcheck
         path: ".*_test.go$"
+      # host_type is proto-deprecated in favour of baremetal_instance_type but
+      # still read by the operator as a ResourceClass fallback.
+      - linters:
+          - staticcheck
+        text: HostType.*deprecated
+      # Preserve the existing exported Go field name used by API consumers.
+      - linters:
+          - staticcheck
+        path: api/v1alpha1/clusterorder_types.go
+        text: 'ST1003: struct field ApiEndpoint should be APIEndpoint'
     paths:
       - third_party$
       - builtin$

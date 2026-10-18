@@ -17,6 +17,7 @@ spec:
       labels:
         app: osac-ui
     spec:
+      automountServiceAccountToken: false
       volumes:
       - name: api-ca-bundle
         configMap:
@@ -27,6 +28,9 @@ spec:
       containers:
       - name: osac-ui
         image: {{ .Values.images.ui }}
+        {{ if ne .Values.images.pullPolicy "auto" }}
+        imagePullPolicy: {{ .Values.images.pullPolicy }}
+        {{ end }}
         ports:
         - name: http
           containerPort: 8080
@@ -39,6 +43,17 @@ spec:
         envFrom:
         - configMapRef:
             name: osac-ui
+        env:
+        - name: OIDC_SERVICE_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.auth.serviceAccount.credentialsSecret }}
+              key: client-id
+        - name: OIDC_SERVICE_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.auth.serviceAccount.credentialsSecret }}
+              key: client-secret
         readinessProbe:
           httpGet:
             path: /health

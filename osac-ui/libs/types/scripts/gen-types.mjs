@@ -1,64 +1,61 @@
+import { mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const typesDirectory = dirname(dirname(fileURLToPath(import.meta.url)));
-const templatePath = join(typesDirectory, 'buf.gen.yaml');
-const args = process.argv.slice(2);
+const sourceDirectory = join(typesDirectory, 'src');
+const bufConfigTemplatePath = join(typesDirectory, 'buf.gen.yaml.template');
+const bufApiVersionPath = join(typesDirectory, '.buf-api-version');
+const apiVersionPattern = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
 
-const getCommit = (providedArgs) => {
-  if (providedArgs.length === 0) {
-    return undefined;
+const readApiVersion = () => {
+  const lines = readFileSync(bufApiVersionPath, 'utf8').split(/\r?\n/);
+  if (lines.at(-1) === '') {
+    lines.pop();
   }
 
-  if (providedArgs.length === 1 && !providedArgs[0].startsWith('--')) {
-    return providedArgs[0];
+  const [version] = lines;
+  if (lines.length !== 1 || !apiVersionPattern.test(version)) {
+    throw new Error(`Expected one stable API version in ${bufApiVersionPath}`);
   }
 
-  if (providedArgs.length === 2 && providedArgs[0] === '--commit') {
-    return providedArgs[1];
-  }
-
-  if (providedArgs.length === 1 && providedArgs[0].startsWith('--commit=')) {
-    return providedArgs[0].slice('--commit='.length);
-  }
-
-  throw new Error('Usage: pnpm gen-types [commit] or pnpm gen-types --commit <commit>');
+  return version;
 };
 
-let temporaryDirectory;
+const renderBufConfig = () => {
+  const template = readFileSync(bufConfigTemplatePath, 'utf8');
+  const placeholder = '__OSAC_API_VERSION__';
+  const placeholderCount = template.split(placeholder).length - 1;
 
-try {
-  const commit = getCommit(args);
-  let bufArgs = ['generate'];
-
-  if (commit !== undefined) {
-    if (commit.length === 0 || /\s/.test(commit)) {
-      throw new Error('The commit must not contain whitespace.');
-    }
-
-    const template = readFileSync(templatePath, 'utf8');
-    const branchPattern = /^(\s*)branch: main$/gm;
-    const branchMatches = template.match(branchPattern);
-
-    if (branchMatches?.length !== 2) {
-      throw new Error('Expected both protobuf inputs to use branch: main.');
-    }
-
-    const customTemplate = template.replace(
-      branchPattern,
-      (_, indentation) => `${indentation}ref: ${JSON.stringify(commit)}`,
-    );
-
-    temporaryDirectory = mkdtempSync(join(tmpdir(), 'osac-gen-types-'));
-    const temporaryTemplatePath = join(temporaryDirectory, 'buf.gen.yaml');
-    writeFileSync(temporaryTemplatePath, customTemplate);
-    bufArgs = ['generate', '--template', temporaryTemplatePath];
+  if (placeholderCount !== 2) {
+    throw new Error(`Expected two ${placeholder} placeholders in ${bufConfigTemplatePath}`);
   }
 
-  const result = spawnSync('buf', bufArgs, {
+  return template.replaceAll(placeholder, readApiVersion());
+};
+
+const removeGeneratedBindings = (directory) => {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = join(directory, entry.name);
+
+    if (entry.isDirectory()) {
+      removeGeneratedBindings(entryPath);
+    } else if (entry.isFile() && entry.name.endsWith('_pb.ts')) {
+      unlinkSync(entryPath);
+    }
+  }
+};
+
+let tempDirectory;
+try {
+  tempDirectory = mkdtempSync(join(tmpdir(), 'osac-buf-generate-'));
+  const bufConfigPath = join(tempDirectory, 'buf.gen.yaml');
+  writeFileSync(bufConfigPath, renderBufConfig());
+  removeGeneratedBindings(sourceDirectory);
+
+  const result = spawnSync('buf', ['generate', '--template', bufConfigPath], {
     cwd: typesDirectory,
     stdio: 'inherit',
   });
@@ -72,7 +69,7 @@ try {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 } finally {
-  if (temporaryDirectory) {
-    rmSync(temporaryDirectory, { force: true, recursive: true });
+  if (tempDirectory) {
+    rmSync(tempDirectory, { force: true, recursive: true });
   }
 }

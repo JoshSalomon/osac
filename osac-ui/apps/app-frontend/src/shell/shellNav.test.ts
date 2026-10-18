@@ -1,21 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
+import { ServiceTier } from '@osac/types';
 import type { UserRole } from '@osac/ui-components/shellTypes';
 import { tIdentity } from '@osac/ui-components/test-utils/i18n';
 
 import { NavLink, NavSection, isNavLink, isNavSection, navRowsForRole } from './shellNav';
 
 const nonIdpRoles: UserRole[] = ['tenant-admin', 'tenant-user'];
+const allServices: ServiceTier[] = [ServiceTier.CAAS, ServiceTier.BMAAS, ServiceTier.VMAAS];
 
 const findLink = (role: UserRole, linkId: string): NavLink | undefined =>
-  navRowsForRole(role, tIdentity).find((row) => isNavLink(row) && row.id === linkId) as
-    | NavLink
-    | undefined;
+  navRowsForRole(role, tIdentity, allServices).find(
+    (row) => isNavLink(row) && row.id === linkId,
+  ) as NavLink | undefined;
 
 const findSection = (role: UserRole, sectionId: string): NavSection | undefined =>
-  navRowsForRole(role, tIdentity).find((row) => isNavSection(row) && row.id === sectionId) as
-    | NavSection
-    | undefined;
+  navRowsForRole(role, tIdentity, allServices).find(
+    (row) => isNavSection(row) && row.id === sectionId,
+  ) as NavSection | undefined;
 
 const servicesChildren = (role: UserRole) =>
   findSection(role, 'nav-tenant-services')?.children ?? [];
@@ -24,12 +26,72 @@ describe('navRowsForRole', () => {
   it('includes Virtual Machines, Clusters, and Bare Metal under Services for tenant roles', () => {
     for (const role of nonIdpRoles) {
       expect(servicesChildren(role)).toEqual([
-        { kind: 'link', id: 'bare-metal', label: 'Bare Metal', path: '/bare-metal' },
-        { kind: 'link', id: 'clusters', label: 'Clusters', path: '/clusters' },
-        { kind: 'link', id: 'compute-vms', label: 'Virtual Machines', path: '/vms' },
+        {
+          kind: 'link',
+          id: 'bare-metal',
+          label: 'Bare Metal',
+          path: '/bare-metal',
+          service: ServiceTier.BMAAS,
+        },
+        {
+          kind: 'link',
+          id: 'clusters',
+          label: 'Clusters',
+          path: '/clusters',
+          service: ServiceTier.CAAS,
+        },
+        {
+          kind: 'link',
+          id: 'compute-vms',
+          label: 'Virtual Machines',
+          path: '/vms',
+          service: ServiceTier.VMAAS,
+        },
       ]);
     }
     expect(servicesChildren('tenant-idp-manager')).toEqual([]);
+  });
+
+  it('removes unavailable service links and empty service sections', () => {
+    const rows = navRowsForRole('tenant-user', tIdentity, [ServiceTier.CAAS]);
+
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'catalog' }),
+        expect.objectContaining({
+          id: 'nav-tenant-services',
+          children: [expect.objectContaining({ id: 'clusters', service: ServiceTier.CAAS })],
+        }),
+      ]),
+    );
+    expect(
+      navRowsForRole('tenant-user', tIdentity, []).some(
+        (row) => isNavSection(row) && row.id === 'nav-tenant-services',
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    { service: ServiceTier.CAAS, linkId: 'clusters' },
+    { service: ServiceTier.VMAAS, linkId: 'compute-vms' },
+    { service: ServiceTier.BMAAS, linkId: 'bare-metal' },
+  ])('keeps only the enabled $service service link', ({ service, linkId }) => {
+    const services = navRowsForRole('tenant-user', tIdentity, [service]).find(
+      (row) => isNavSection(row) && row.id === 'nav-tenant-services',
+    );
+
+    expect(services).toEqual(
+      expect.objectContaining({
+        children: [expect.objectContaining({ id: linkId, service })],
+      }),
+    );
+  });
+
+  it('does not create a MaaS navigation surface', () => {
+    const rows = navRowsForRole('tenant-user', tIdentity, [ServiceTier.MAAS]);
+
+    expect(rows.some((row) => isNavSection(row) && row.id === 'nav-tenant-services')).toBe(false);
+    expect(rows).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'catalog' })]));
   });
 
   it('excludes Services section for admin (cloud-provider-admin) role', () => {
@@ -62,6 +124,12 @@ describe('navRowsForRole', () => {
           label: 'Security groups',
           path: '/networking/security-groups',
         },
+        {
+          kind: 'link',
+          id: 'external-ips',
+          label: 'External IPs',
+          path: '/networking/external-ips',
+        },
       ]);
     }
     const networking = findSection('tenant-idp-manager', 'nav-tenant-networking');
@@ -81,7 +149,7 @@ describe('navRowsForRole', () => {
     ]);
   });
 
-  it('Infrastructure section shows up only for admin role and contains storage, instance types, external IP pools, bare metal instance types, and disk images', () => {
+  it('Infrastructure section shows up only for admin role and contains instance types, external IP pools, bare metal instance types, and disk images', () => {
     expect(findSection('admin', 'nav-infrastructure')).toEqual({
       kind: 'section',
       id: 'nav-infrastructure',
@@ -89,15 +157,10 @@ describe('navRowsForRole', () => {
       children: [
         {
           kind: 'link',
-          id: 'storage',
-          label: 'Storage',
-          path: '/admin/infrastructure/storage',
-        },
-        {
-          kind: 'link',
           id: 'instance-types',
           label: 'Instance types',
           path: '/admin/infrastructure/instance-types',
+          service: ServiceTier.VMAAS,
         },
         {
           kind: 'link',
@@ -110,6 +173,7 @@ describe('navRowsForRole', () => {
           id: 'baremetal-instance-types',
           label: 'Bare metal instance types',
           path: '/admin/infrastructure/baremetal-instance-types',
+          service: ServiceTier.BMAAS,
         },
         {
           kind: 'link',
@@ -122,6 +186,51 @@ describe('navRowsForRole', () => {
     for (const role of ['tenant-user', 'tenant-admin', 'tenant-idp-manager'] as UserRole[]) {
       expect(findSection(role, 'nav-infrastructure')).toBeUndefined();
     }
+  });
+
+  it('admin Storage section is standalone with Storage Backends and Storage Tiers links', () => {
+    expect(findSection('admin', 'nav-admin-storage')).toEqual({
+      kind: 'section',
+      id: 'nav-admin-storage',
+      label: 'Storage',
+      children: [
+        {
+          kind: 'link',
+          id: 'storage-backends',
+          label: 'Storage Backends',
+          path: '/admin/infrastructure/storage/backends',
+        },
+        {
+          kind: 'link',
+          id: 'storage-tiers',
+          label: 'Storage Tiers',
+          path: '/admin/infrastructure/storage/tiers',
+        },
+      ],
+    });
+    for (const role of ['tenant-user', 'tenant-admin', 'tenant-idp-manager'] as UserRole[]) {
+      expect(findSection(role, 'nav-admin-storage')).toBeUndefined();
+    }
+  });
+
+  it('includes Storage section with Volumes link only for tenant-admin', () => {
+    const storage = findSection('tenant-admin', 'nav-tenant-storage');
+    expect(storage).toBeDefined();
+    expect(storage?.children).toEqual([
+      { kind: 'link', id: 'volumes', label: 'Volumes', path: '/storage/volumes' },
+    ]);
+  });
+
+  it('excludes tenant Storage section for tenant-user', () => {
+    expect(findSection('tenant-user', 'nav-tenant-storage')).toBeUndefined();
+  });
+
+  it('excludes tenant Storage section for admin role', () => {
+    expect(findSection('admin', 'nav-tenant-storage')).toBeUndefined();
+  });
+
+  it('excludes tenant Storage section for IDP manager', () => {
+    expect(findSection('tenant-idp-manager', 'nav-tenant-storage')).toBeUndefined();
   });
 
   it('IDP sections show for tenant-idp-manager and tenant-admin', () => {

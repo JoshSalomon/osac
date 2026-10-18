@@ -14,6 +14,7 @@ language governing permissions and limitations under the License.
 package label
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"log/slog"
@@ -24,7 +25,6 @@ import (
 
 	"github.com/osac-project/osac/fulfillment-service/internal/config"
 	"github.com/osac-project/osac/fulfillment-service/internal/logging"
-	"github.com/osac-project/osac/fulfillment-service/internal/packages"
 	"github.com/osac-project/osac/fulfillment-service/internal/reflection"
 	"github.com/osac-project/osac/fulfillment-service/internal/terminal"
 )
@@ -88,6 +88,7 @@ func (c *runnerContext) run(cmd *cobra.Command, args []string) error {
 		SetConnection(c.conn).
 		AddPackages(cfg.Packages()).
 		SetTenantFunc(config.TenantFromContext).
+		SetProjectFunc(config.ProjectFromContext).
 		Build()
 	if err != nil {
 		return fmt.Errorf("failed to create reflection tool: %w", err)
@@ -213,7 +214,11 @@ func completeObjectTypes(cmd *cobra.Command, args []string, toComplete string) (
 	if len(args) != 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	return reflection.ObjectTypeNames(packages.Public...), cobra.ShellCompDirectiveNoFileComp
+	var ctx context.Context
+	if cmd != nil {
+		ctx = cmd.Context()
+	}
+	return reflection.ObjectTypeNames(config.PackageNamesFromContext(ctx)...), cobra.ShellCompDirectiveNoFileComp
 }
 
 const shortHelp = `Add or remove labels from objects`

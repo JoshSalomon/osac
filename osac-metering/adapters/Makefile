@@ -36,10 +36,14 @@ test:
 lint: golangci-lint
 	$(GOLANGCI_LINT) run ./...
 
-# Context is `..` (osac-metering/), not `.` -- both adapter Containerfiles
-# also COPY the sibling schema/ directory, which only exists one level up
-# from adapters/ (matches build-metering-{m360,echo}-adapter-image.yaml's
-# `context: osac-metering`, `file: osac-metering/adapters/Containerfile.*`).
+# Context is `../..` (repo root), not `..` -- both adapter Containerfiles
+# also copy go.work and sibling workspace modules' go.mod/go.sum from the
+# repo root (needed so Hermeto's hermetic prefetch and the real build
+# resolve dependencies in the same mode; see the Containerfile's own
+# comment for the full story), in addition to the sibling schema/
+# directory one level up from adapters/ (matches
+# build-metering-{m360,echo}-adapter-image.yaml's `context: .`,
+# `file: osac-metering/adapters/Containerfile.*`).
 image-build-m360-adapter:
 ifneq ($(origin OPENSHELL_SANDBOX),undefined)
 	@if [ "$(origin IMG_M360_ADAPTER)" != file ] || [ "$(origin CONTAINER_TOOL)" != file ]; then \
@@ -52,7 +56,7 @@ ifneq ($(origin OPENSHELL_SANDBOX),undefined)
 	fi
 	@../../tools/carbonite/host-build metering-m360
 else
-	$(CONTAINER_TOOL) build -t $(IMG_M360_ADAPTER) -f Containerfile.m360-adapter ..
+	$(CONTAINER_TOOL) build -t $(IMG_M360_ADAPTER) -f Containerfile.m360-adapter ../..
 endif
 
 image-push-m360-adapter:
@@ -70,7 +74,7 @@ ifneq ($(origin OPENSHELL_SANDBOX),undefined)
 	fi
 	@../../tools/carbonite/host-build metering-echo
 else
-	$(CONTAINER_TOOL) build -t $(IMG_ECHO_ADAPTER) -f Containerfile.echo-adapter ..
+	$(CONTAINER_TOOL) build -t $(IMG_ECHO_ADAPTER) -f Containerfile.echo-adapter ../..
 endif
 
 image-push-echo-adapter:

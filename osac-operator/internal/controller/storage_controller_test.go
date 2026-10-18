@@ -228,6 +228,34 @@ func newTestStorageBackendGetResponse(provider string) *privatev1.StorageBackend
 	}.Build()
 }
 
+// configureTwoProviderReadinessClients wires tier and backend API responses for
+// readiness tests that exercise two registered storage providers.
+func configureTwoProviderReadinessClients(r *StorageReconciler, registeredBackendCount int32) {
+	r.TiersClient = &mockStorageTiersLister{
+		listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+			return privatev1.StorageTiersListResponse_builder{
+				Items: []*privatev1.StorageTier{
+					newTestStorageTier("local", "backend-lvms"),
+					newTestStorageTier("block", "backend-vast"),
+				},
+			}.Build(), nil
+		},
+	}
+	r.BackendsClient = &mockStorageBackendsClient{
+		listFunc: registeredBackendsClient(registeredBackendCount).listFunc,
+		getFunc: func(_ context.Context, in *privatev1.StorageBackendsGetRequest, _ ...grpc.CallOption) (*privatev1.StorageBackendsGetResponse, error) {
+			switch in.GetId() {
+			case "backend-lvms":
+				return newTestStorageBackendGetResponse("lvms"), nil
+			case "backend-vast":
+				return newTestStorageBackendGetResponse("vast"), nil
+			default:
+				return nil, status.Error(codes.NotFound, "not found")
+			}
+		},
+	}
+}
+
 func newClusterOrder(name, namespace string, annotations map[string]string) *v1alpha1.ClusterOrder {
 	return &v1alpha1.ClusterOrder{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1448,6 +1476,231 @@ var _ = Describe("Storage Controller", func() {
 		})
 	})
 
+	Context("Tier resolution failure guard", func() {
+		// These tests verify that when TiersClient and BackendsClient are both
+		// configured but tier resolution fails (e.g. fulfillment service down),
+		// the storage reconciler does NOT proceed to call AAP provisioning
+		// providers — matching the guard already present in handleCaaSDelete
+		// (OSAC-4855) but extending it to the provisioning (update) paths.
+
+		It("should not call ClusterStorageProvider when tier resolution fails", func() {
+			name := "storage-test-guard-cluster-provider"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+			createHubSecret(ctx, name, secretsNamespace)
+
+			triggerCount := 0
+			clusterProvider := &mockProvisioningProvider{
+				name: "cluster-storage-mock",
+				triggerProvisionFunc: func(_ context.Context, _ client.Object) (*provisioning.ProvisionResult, error) {
+					triggerCount++
+					return &provisioning.ProvisionResult{JobID: "should-not-run", InitialState: v1alpha1.JobStatePending}, nil
+				},
+			}
+
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, clusterProvider, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			r.TiersClient = &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return nil, status.Error(codes.Unavailable, "fulfillment service unreachable")
+				},
+			}
+			r.BackendsClient = registeredBackendsClient(0)
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			result, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(pollInterval),
+				"should requeue so the controller retries when the fulfillment service recovers")
+			Expect(triggerCount).To(Equal(0),
+				"AAP must not be called when tier resolution failed and a provider is configured")
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			backendCond := tenant.GetStatusCondition(v1alpha1.TenantConditionStorageBackendReady)
+			Expect(backendCond).NotTo(BeNil())
+			Expect(backendCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(backendCond.Reason).To(Equal("TierResolutionFailed"))
+			Expect(backendCond.Message).To(ContainSubstring("fulfillment service unreachable"),
+				"condition message should carry the actual resolution error")
+		})
+
+		It("should not call BackendProvider when tier resolution fails", func() {
+			name := "storage-test-guard-backend-provider"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+
+			triggerCount := 0
+			backendProvider := &mockProvisioningProvider{
+				name: "backend-mock",
+				triggerProvisionFunc: func(_ context.Context, _ client.Object) (*provisioning.ProvisionResult, error) {
+					triggerCount++
+					return &provisioning.ProvisionResult{JobID: "should-not-run", InitialState: v1alpha1.JobStatePending}, nil
+				},
+			}
+
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				backendProvider, nil, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			r.TiersClient = &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return nil, status.Error(codes.Unauthenticated, "token expired")
+				},
+			}
+			r.BackendsClient = registeredBackendsClient(1)
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			result, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(pollInterval))
+			Expect(triggerCount).To(Equal(0),
+				"BackendProvider AAP must not be called when tier resolution failed")
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			backendCond := tenant.GetStatusCondition(v1alpha1.TenantConditionStorageBackendReady)
+			Expect(backendCond).NotTo(BeNil())
+			Expect(backendCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(backendCond.Reason).To(Equal("TierResolutionFailed"))
+			Expect(backendCond.Message).To(ContainSubstring("token expired"),
+				"condition message should carry the actual resolution error")
+		})
+
+		It("should proceed normally when tier clients are nil (backward compat)", func() {
+			name := "storage-test-guard-nil-clients"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+			createLabeledStorageClass(ctx, name+"-default-sc", name, "default")
+
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, nil, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			// TiersClient and BackendsClient are nil — pre-tier-API environment
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			clusterCond := tenant.GetStatusCondition(v1alpha1.TenantConditionClusterStorageReady)
+			Expect(clusterCond).NotTo(BeNil())
+			Expect(clusterCond.Status).To(Equal(metav1.ConditionTrue),
+				"backward compatibility: nil tier clients must not block StorageClass resolution")
+		})
+
+		It("should not block deletion when tier resolution fails", func() {
+			name := "storage-test-guard-delete-unblocked"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+
+			// Use no providers so deletion proceeds without AAP job polling,
+			// matching the existing "should run deletion even when class
+			// provider is nil" pattern. handleDelete skips deprovisioning
+			// and removes the finalizer despite the tier resolution error.
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, nil, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			r.TiersClient = &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return nil, status.Error(codes.Unavailable, "fulfillment service unreachable")
+				},
+			}
+			r.BackendsClient = registeredBackendsClient(0)
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			// First reconcile adds finalizer; no providers configured so no
+			// guard triggers and the reconcile completes normally.
+			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			Expect(tenant.Finalizers).To(ContainElement(storageFinalizer))
+
+			Expect(k8sClient.Delete(ctx, tenant)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				_, reconcileErr := r.Reconcile(ctx, storageReconcileRequest(nn))
+				g.Expect(reconcileErr).NotTo(HaveOccurred(),
+					"tier resolution failure must not block finalizer removal during deletion")
+
+				t := &v1alpha1.Tenant{}
+				getErr := k8sClient.Get(ctx, nn, t)
+				g.Expect(client.IgnoreNotFound(getErr)).To(Succeed())
+				if getErr == nil {
+					g.Expect(t.Finalizers).NotTo(ContainElement(storageFinalizer))
+				}
+			}).Should(Succeed())
+		})
+
+		It("should retain finalizer and requeue when tier resolution fails during deletion with providers configured", func() {
+			name := "storage-test-guard-delete-retain-finalizer"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+
+			deprovTriggers := 0
+			clusterProvider := &mockProvisioningProvider{
+				name: "cluster-storage-mock",
+				triggerDeprovisionFunc: func(_ context.Context, _ client.Object, _ []v1alpha1.JobStatus) (*provisioning.DeprovisionResult, error) {
+					deprovTriggers++
+					return &provisioning.DeprovisionResult{
+						Action:                 provisioning.DeprovisionTriggered,
+						JobID:                  "should-not-run-deprov",
+						BlockDeletionOnFailure: true,
+					}, nil
+				},
+			}
+
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, clusterProvider, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			r.TiersClient = &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return nil, status.Error(codes.Unavailable, "fulfillment service unreachable")
+				},
+			}
+			r.BackendsClient = registeredBackendsClient(0)
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			// First reconcile: handleUpdate guard triggers (tier err + provider),
+			// but the finalizer is added before the guard.
+			result, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(pollInterval))
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			Expect(tenant.Finalizers).To(ContainElement(storageFinalizer))
+
+			Expect(k8sClient.Delete(ctx, tenant)).To(Succeed())
+
+			// Reconcile with DeletionTimestamp set: tier resolution still fails,
+			// so handleDelete retains the finalizer and requeues instead of
+			// launching AAP deprovisioning without backend connections.
+			Eventually(func(g Gomega) {
+				deleteResult, reconcileErr := r.Reconcile(ctx, storageReconcileRequest(nn))
+				g.Expect(reconcileErr).NotTo(HaveOccurred())
+				g.Expect(deleteResult.RequeueAfter).To(Equal(pollInterval),
+					"should requeue at poll interval so the controller retries when the fulfillment service recovers")
+
+				t := &v1alpha1.Tenant{}
+				g.Expect(k8sClient.Get(ctx, nn, t)).To(Succeed())
+				g.Expect(t.Finalizers).To(ContainElement(storageFinalizer),
+					"finalizer must be retained — deprovisioning deferred until tier resolution recovers")
+			}).Should(Succeed())
+
+			Expect(deprovTriggers).To(Equal(0),
+				"deprovisioning AAP must not be called when tier resolution failed during deletion")
+		})
+	})
+
 	Context("Finalizer and deletion", func() {
 		It("should add storage finalizer on first reconcile", func() {
 			name := "storage-test-finalizer"
@@ -1502,8 +1755,8 @@ var _ = Describe("Storage Controller", func() {
 			}).Should(Succeed())
 		})
 
-		It("should remove the finalizer during deletion even when tier resolution fails", func() {
-			name := "storage-test-delete-tier-resolution-failure"
+		It("should remove the finalizer during deletion when only TiersClient is set (partial-client backward compat)", func() {
+			name := "storage-test-delete-partial-client"
 			createReadyTenantForStorage(ctx, name, testNamespace)
 
 			backendProvider := &mockProvisioningProvider{name: "backend-mock"}
@@ -1512,6 +1765,10 @@ var _ = Describe("Storage Controller", func() {
 				backendProvider, nil, pollInterval,
 				provisioning.DefaultMaxJobHistory,
 			)
+			// TiersClient is set but BackendsClient is nil — resolveAndInjectTierContext
+			// requires both to attempt resolution, so it skips and returns nil error.
+			// This covers the partial-client misconfiguration path: no tier resolution
+			// is attempted, no error is raised, and deletion proceeds normally.
 			r.TiersClient = &mockStorageTiersLister{
 				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
 					return nil, status.Error(codes.Unavailable, "fulfillment service unreachable")
@@ -1530,7 +1787,8 @@ var _ = Describe("Storage Controller", func() {
 
 			Eventually(func(g Gomega) {
 				_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
-				g.Expect(err).NotTo(HaveOccurred(), "a Tier API failure must not block finalizer removal during deletion")
+				g.Expect(err).NotTo(HaveOccurred(),
+					"partial client config (TiersClient only) must not block finalizer removal during deletion")
 
 				t := &v1alpha1.Tenant{}
 				err = k8sClient.Get(ctx, nn, t)
@@ -1758,6 +2016,420 @@ var _ = Describe("Storage Controller", func() {
 		})
 	})
 
+	Context("Multi-provider hub secret readiness (OSAC-4855)", func() {
+		It("should not set StorageBackendReady=True when hub Secrets exist for only some dispatched providers", func() {
+			name := "storage-test-partial-provider-secrets"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+			// createHubSecret creates only an lvms-provider Secret
+			createHubSecret(ctx, name, secretsNamespace)
+
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, nil, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			configureTwoProviderReadinessClients(r, 0)
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+
+			backendCond := tenant.GetStatusCondition(v1alpha1.TenantConditionStorageBackendReady)
+			Expect(backendCond).NotTo(BeNil())
+			Expect(backendCond.Status).To(Equal(metav1.ConditionFalse),
+				"should not be True when only some providers have hub Secrets")
+			Expect(backendCond.Reason).To(Equal(v1alpha1.TenantReasonNoProvider))
+			Expect(backendCond.Message).To(Equal("Hub Secret readiness by backend: ready (1): backend-lvms: lvms; not ready (1): backend-vast: vast; no storage backend registered"))
+			Expect(tenant.Status.StorageBackends).To(ConsistOf(
+				v1alpha1.StorageBackendStatus{
+					Name:     "backend-lvms",
+					Provider: "lvms",
+					Ready:    true,
+					Message:  fmt.Sprintf("Hub Secret for tenant %q exists", name),
+				},
+				v1alpha1.StorageBackendStatus{
+					Name:     "backend-vast",
+					Provider: "vast",
+					Ready:    false,
+					Message:  fmt.Sprintf("Hub Secret for tenant %q not found", name),
+				},
+			))
+		})
+
+		It("should explicitly report when no backend Hub Secrets are ready", func() {
+			name := "storage-test-no-provider-secrets"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, nil, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			configureTwoProviderReadinessClients(r, 0)
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+
+			backendCond := tenant.GetStatusCondition(v1alpha1.TenantConditionStorageBackendReady)
+			Expect(backendCond).NotTo(BeNil())
+			Expect(backendCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(backendCond.Reason).To(Equal(v1alpha1.TenantReasonNoProvider))
+			Expect(backendCond.Message).To(Equal("Hub Secret readiness by backend: ready (0): none; not ready (2): backend-lvms: lvms, backend-vast: vast; no backend Hub Secrets are ready; no storage backend registered"))
+			Expect(tenant.Status.StorageBackends).To(ConsistOf(
+				v1alpha1.StorageBackendStatus{
+					Name:     "backend-lvms",
+					Provider: "lvms",
+					Ready:    false,
+					Message:  fmt.Sprintf("Hub Secret for tenant %q not found", name),
+				},
+				v1alpha1.StorageBackendStatus{
+					Name:     "backend-vast",
+					Provider: "vast",
+					Ready:    false,
+					Message:  fmt.Sprintf("Hub Secret for tenant %q not found", name),
+				},
+			))
+		})
+
+		It("should set StorageBackendReady=True when hub Secrets exist for all dispatched providers", func() {
+			name := "storage-test-all-provider-secrets"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+			createHubSecret(ctx, name, secretsNamespace) // lvms secret
+
+			// Create vast secret too
+			vastSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("vast-tenant-config-%s", name),
+					Namespace: secretsNamespace,
+					Labels: map[string]string{
+						osacTenantKey:            name,
+						osacStorageProviderLabel: "vast",
+					},
+				},
+				StringData: map[string]string{"provider": "vast"},
+			}
+			Expect(k8sClient.Create(ctx, vastSecret)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, vastSecret))).To(Succeed())
+			})
+
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, nil, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			configureTwoProviderReadinessClients(r, 0)
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+
+			backendCond := tenant.GetStatusCondition(v1alpha1.TenantConditionStorageBackendReady)
+			Expect(backendCond).NotTo(BeNil())
+			Expect(backendCond.Status).To(Equal(metav1.ConditionTrue),
+				"should be True when all providers have hub Secrets")
+			Expect(backendCond.Reason).To(Equal(v1alpha1.TenantReasonFound))
+			Expect(backendCond.Message).To(Equal("Hub Secret readiness by backend: ready (2): backend-lvms: lvms, backend-vast: vast; not ready (0): none"))
+			Expect(tenant.Status.StorageBackends).To(ConsistOf(
+				v1alpha1.StorageBackendStatus{
+					Name:     "backend-lvms",
+					Provider: "lvms",
+					Ready:    true,
+					Message:  fmt.Sprintf("Hub Secret for tenant %q exists", name),
+				},
+				v1alpha1.StorageBackendStatus{
+					Name:     "backend-vast",
+					Provider: "vast",
+					Ready:    true,
+					Message:  fmt.Sprintf("Hub Secret for tenant %q exists", name),
+				},
+			))
+		})
+
+		It("should fall back to any-secret check when no tier definitions are available", func() {
+			name := "storage-test-no-tiers-fallback"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+			createHubSecret(ctx, name, secretsNamespace)
+
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, nil, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			// No TiersClient/BackendsClient: tierDefinitions will be nil
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+
+			backendCond := tenant.GetStatusCondition(v1alpha1.TenantConditionStorageBackendReady)
+			Expect(backendCond).NotTo(BeNil())
+			Expect(backendCond.Status).To(Equal(metav1.ConditionTrue),
+				"should be True when any hub Secret exists and no tier definitions are available (backward compat)")
+			Expect(backendCond.Reason).To(Equal(v1alpha1.TenantReasonFound))
+			Expect(backendCond.Message).To(Equal("No storage backend entries are available to evaluate (ready: 0; not ready: 0); legacy tenant-wide Hub Secret check: found a Secret"))
+		})
+	})
+
+	Context("Multi-tier retry (OSAC-4855)", func() {
+		It("should trigger retry when some tiers resolve but others are missing and provider is configured", func() {
+			name := "storage-test-partial-tier-retry"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+			createHubSecret(ctx, name, secretsNamespace)
+			createLabeledStorageClass(ctx, name+"-local-sc", name, "local")
+			// No SC for "block" tier
+
+			clusterProvider := &mockProvisioningProvider{name: "cluster-storage-mock"}
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, clusterProvider, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			r.TiersClient = &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return privatev1.StorageTiersListResponse_builder{
+						Items: []*privatev1.StorageTier{
+							newTestStorageTier("local", "backend-lvms"),
+							newTestStorageTier("block", "backend-vast"),
+						},
+					}.Build(), nil
+				},
+			}
+			r.BackendsClient = &mockStorageBackendsClient{
+				getFunc: func(_ context.Context, in *privatev1.StorageBackendsGetRequest, _ ...grpc.CallOption) (*privatev1.StorageBackendsGetResponse, error) {
+					switch in.GetId() {
+					case "backend-lvms":
+						return newTestStorageBackendGetResponse("lvms"), nil
+					case "backend-vast":
+						return newTestStorageBackendGetResponse("vast"), nil
+					}
+					return nil, status.Error(codes.NotFound, "not found")
+				},
+			}
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			result, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(pollInterval), "should requeue for provisioning retry")
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+
+			clusterCond := tenant.GetStatusCondition(v1alpha1.TenantConditionClusterStorageReady)
+			Expect(clusterCond).NotTo(BeNil())
+			Expect(clusterCond.Status).To(Equal(metav1.ConditionFalse),
+				"should be False when tiers are missing; handleCaaSDelete runs before this check so finalizer removal is safe (OSAC-4855)")
+			Expect(clusterCond.Message).To(ContainSubstring(`tier "block" has no StorageClass`))
+
+			// Resolved tier should still be present in status
+			Expect(tenant.Status.StorageClasses).To(HaveLen(1))
+			Expect(tenant.Status.StorageClasses[0].Tier).To(Equal("local"))
+
+			// Provisioning job should be triggered for missing tiers
+			Expect(tenant.Status.ClusterStorageJobs).To(HaveLen(1))
+		})
+
+		It("should requeue without creating new jobs when failed job exists and hub Secret appears", func() {
+			name := "storage-test-failed-tier-retry"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+			createHubSecret(ctx, name, secretsNamespace)
+			createLabeledStorageClass(ctx, name+"-local-sc", name, "local")
+			waitForStorageClass := func(scName string) {
+				Eventually(func() error {
+					return testMcManager.GetLocalManager().GetClient().Get(ctx,
+						client.ObjectKey{Name: scName}, &storagev1.StorageClass{})
+				}, 5*time.Second, 10*time.Millisecond).Should(Succeed())
+			}
+			waitForStorageClass(name + "-local-sc")
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			tenant.Status.ClusterStorageJobs = []v1alpha1.JobStatus{{
+				JobID:     "failed-cluster-storage",
+				Type:      v1alpha1.JobTypeProvision,
+				State:     v1alpha1.JobStateFailed,
+				Timestamp: metav1.Now(),
+			}}
+			Expect(k8sClient.Status().Update(ctx, tenant)).To(Succeed())
+
+			triggers := 0
+			clusterProvider := &mockProvisioningProvider{
+				name: "cluster-storage-mock",
+				triggerProvisionFunc: func(context.Context, client.Object) (*provisioning.ProvisionResult, error) {
+					triggers++
+					return &provisioning.ProvisionResult{
+						JobID:        "replacement-cluster-storage",
+						InitialState: v1alpha1.JobStateRunning,
+					}, nil
+				},
+				getProvisionStatusFunc: func(_ context.Context, _ client.Object, jobID string) (provisioning.ProvisionStatus, error) {
+					return provisioning.ProvisionStatus{JobID: jobID, State: v1alpha1.JobStateRunning}, nil
+				},
+			}
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, clusterProvider, pollInterval, provisioning.DefaultMaxJobHistory,
+			)
+			// Use direct reads to make successive reconciles independent of cache lag.
+			r.Client = k8sClient
+			r.TiersClient = &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return privatev1.StorageTiersListResponse_builder{
+						Items: []*privatev1.StorageTier{
+							newTestStorageTier("local", "backend-lvms"),
+							newTestStorageTier("block", "backend-vast"),
+						},
+					}.Build(), nil
+				},
+			}
+			r.BackendsClient = &mockStorageBackendsClient{
+				getFunc: func(_ context.Context, in *privatev1.StorageBackendsGetRequest, _ ...grpc.CallOption) (*privatev1.StorageBackendsGetResponse, error) {
+					switch in.GetId() {
+					case "backend-lvms":
+						return newTestStorageBackendGetResponse("lvms"), nil
+					case "backend-vast":
+						return newTestStorageBackendGetResponse("vast"), nil
+					}
+					return nil, status.Error(codes.NotFound, "not found")
+				},
+			}
+
+			// The failed job cannot be retried while the vast backend is absent.
+			result, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeZero())
+			Expect(triggers).To(BeZero())
+
+			vastSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+				Name:      name + "-vast",
+				Namespace: secretsNamespace,
+				Labels:    map[string]string{osacTenantKey: name, osacStorageProviderLabel: "vast"},
+			}}
+			Expect(k8sClient.Create(ctx, vastSecret)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, vastSecret))).To(Succeed())
+			})
+
+			// Backend readiness enables retries: failed job + hubSecretReady →
+			// requeue at StatusPollInterval without creating a new job.
+			result, err = r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(pollInterval),
+				"should requeue at StatusPollInterval, not spawn a new job")
+			Expect(triggers).To(BeZero(), "no new provisioning jobs should be triggered")
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			Expect(tenant.GetStatusCondition(v1alpha1.TenantConditionStorageBackendReady).Status).To(Equal(metav1.ConditionTrue))
+			Expect(tenant.GetStatusCondition(v1alpha1.TenantConditionClusterStorageReady).Status).To(Equal(metav1.ConditionFalse),
+				"should be False when tiers are still missing")
+
+			// Once the missing StorageClass appears, the condition flips to True
+			// without needing a new provisioning job.
+			createLabeledStorageClass(ctx, name+"-block-sc", name, "block")
+			waitForStorageClass(name + "-block-sc")
+			_, err = r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			Expect(tenant.GetStatusCondition(v1alpha1.TenantConditionClusterStorageReady).Status).To(Equal(metav1.ConditionTrue))
+			Expect(tenant.Status.StorageClasses).To(HaveLen(2))
+			Expect(triggers).To(BeZero(), "no provisioning jobs should have been triggered at any point")
+		})
+
+		It("should set ClusterStorageReady=True when all defined tiers have StorageClasses and provider is configured", func() {
+			name := "storage-test-all-tiers-resolved"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+			createHubSecret(ctx, name, secretsNamespace)
+			createLabeledStorageClass(ctx, name+"-local-sc", name, "local")
+			createLabeledStorageClass(ctx, name+"-block-sc", name, "block")
+
+			clusterProvider := &mockProvisioningProvider{name: "cluster-storage-mock"}
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, clusterProvider, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			r.TiersClient = &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return privatev1.StorageTiersListResponse_builder{
+						Items: []*privatev1.StorageTier{
+							newTestStorageTier("local", "backend-lvms"),
+							newTestStorageTier("block", "backend-vast"),
+						},
+					}.Build(), nil
+				},
+			}
+			r.BackendsClient = &mockStorageBackendsClient{
+				getFunc: func(_ context.Context, in *privatev1.StorageBackendsGetRequest, _ ...grpc.CallOption) (*privatev1.StorageBackendsGetResponse, error) {
+					switch in.GetId() {
+					case "backend-lvms":
+						return newTestStorageBackendGetResponse("lvms"), nil
+					case "backend-vast":
+						return newTestStorageBackendGetResponse("vast"), nil
+					}
+					return nil, status.Error(codes.NotFound, "not found")
+				},
+			}
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+
+			clusterCond := tenant.GetStatusCondition(v1alpha1.TenantConditionClusterStorageReady)
+			Expect(clusterCond).NotTo(BeNil())
+			Expect(clusterCond.Status).To(Equal(metav1.ConditionTrue),
+				"should be True when all defined tiers have StorageClasses")
+
+			Expect(tenant.Status.StorageClasses).To(HaveLen(2))
+			Expect(tenant.Status.ClusterStorageJobs).To(BeEmpty(),
+				"no provisioning job should be triggered when all tiers are resolved")
+		})
+
+		It("should not trigger retry when no tier definitions are available and some SCs exist", func() {
+			name := "storage-test-no-tiers-no-retry"
+			createReadyTenantForStorage(ctx, name, testNamespace)
+			createHubSecret(ctx, name, secretsNamespace)
+			createLabeledStorageClass(ctx, name+"-default-sc", name, "default")
+
+			clusterProvider := &mockProvisioningProvider{name: "cluster-storage-mock"}
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, clusterProvider, pollInterval,
+				provisioning.DefaultMaxJobHistory,
+			)
+			// No TiersClient/BackendsClient: tierDefinitions will be nil (backward compat)
+
+			nn := types.NamespacedName{Name: name, Namespace: testNamespace}
+			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+
+			clusterCond := tenant.GetStatusCondition(v1alpha1.TenantConditionClusterStorageReady)
+			Expect(clusterCond).NotTo(BeNil())
+			Expect(clusterCond.Status).To(Equal(metav1.ConditionTrue),
+				"should be True when SCs exist and no tier definitions (backward compat)")
+
+			Expect(tenant.Status.ClusterStorageJobs).To(BeEmpty())
+		})
+	})
+
 	Context("Deprovisioning ordering", func() {
 		It("should clean up cluster storage before backend teardown", func() {
 			name := "storage-test-deprov-order"
@@ -1941,7 +2613,7 @@ var _ = Describe("Storage Controller", func() {
 			Expect(backendCond).NotTo(BeNil())
 			Expect(backendCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(backendCond.Reason).To(Equal(v1alpha1.TenantReasonNoProvider))
-			Expect(backendCond.Message).To(ContainSubstring("No fulfillment service connection configured"))
+			Expect(backendCond.Message).To(Equal("No storage backend entries are available to evaluate (ready: 0; not ready: 0); legacy tenant-wide Hub Secret check: no Secret found; no fulfillment service connection configured; storage backend status unknown"))
 			// Falls through to Stage 2: tenant-specific SC resolved, no AAP job triggered
 			Expect(tenant.Status.StorageClasses).NotTo(BeEmpty())
 			Expect(tenant.Status.StorageBackendJobs).To(BeEmpty())
@@ -1970,7 +2642,7 @@ var _ = Describe("Storage Controller", func() {
 			Expect(backendCond).NotTo(BeNil())
 			Expect(backendCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(backendCond.Reason).To(Equal(v1alpha1.TenantReasonNoProvider))
-			Expect(backendCond.Message).To(ContainSubstring("No storage backend registered"))
+			Expect(backendCond.Message).To(Equal("No storage backend entries are available to evaluate (ready: 0; not ready: 0); legacy tenant-wide Hub Secret check: no Secret found; no storage backend registered"))
 			Expect(tenant.Status.StorageClasses).NotTo(BeEmpty())
 			Expect(tenant.Status.StorageBackendJobs).To(BeEmpty())
 		})
@@ -1998,10 +2670,11 @@ var _ = Describe("Storage Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal(v1alpha1.TenantReasonBackendConfiguredNoProvider))
+			Expect(cond.Message).To(Equal("No storage backend entries are available to evaluate (ready: 0; not ready: 0); legacy tenant-wide Hub Secret check: no Secret found; storage backend is registered but no AAP is configured to provision the hub Secret for tenant \"storage-test-backend-no-aap\""))
 			Expect(tenant.Status.StorageBackendJobs).To(BeEmpty())
 		})
 
-		It("should requeue with StatusPollInterval when cluster storage job failed and hub Secret exists", func() {
+		It("should requeue at poll interval when cluster storage job failed and hub Secret exists", func() {
 			name := "storage-test-cs-retry"
 			createReadyTenantForStorage(ctx, name, testNamespace)
 			createHubSecret(ctx, name, secretsNamespace)
@@ -2028,10 +2701,12 @@ var _ = Describe("Storage Controller", func() {
 			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
 			Expect(err).NotTo(HaveOccurred())
 
-			// Second reconcile: failed job found, hub Secret exists → requeue with backoff.
+			// Second reconcile: failed job found, hub Secret exists → requeue at
+			// StatusPollInterval. The job stays terminal; no new job is created.
 			result, err := r.Reconcile(ctx, storageReconcileRequest(nn))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(pollInterval))
+			Expect(result.RequeueAfter).To(Equal(pollInterval),
+				"should requeue at StatusPollInterval without spawning a new job")
 		})
 
 		It("should propagate error when BackendsClient.List returns a gRPC error", func() {
@@ -2314,6 +2989,16 @@ var _ = Describe("Storage Controller", func() {
 			Expect(k8sClient.Create(ctx, co)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, co) })
 
+			tenant := &v1alpha1.Tenant{}
+			nn := types.NamespacedName{Name: tenantName, Namespace: testNamespace}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			tenant.Status.ClusterStorage = []v1alpha1.ClusterStorageStatus{{
+				ClusterName: co.Name,
+				Ready:       true,
+				Reason:      v1alpha1.TenantReasonFound,
+			}}
+			Expect(k8sClient.Status().Update(ctx, tenant)).To(Succeed())
+
 			co.Status.Phase = v1alpha1.ClusterOrderPhaseReady
 			Expect(k8sClient.Status().Update(ctx, co)).To(Succeed())
 
@@ -2323,15 +3008,25 @@ var _ = Describe("Storage Controller", func() {
 				nil, nil, pollInterval, provisioning.DefaultMaxJobHistory,
 			)
 
-			nn := types.NamespacedName{Name: tenantName, Namespace: testNamespace}
 			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
 			Expect(err).NotTo(HaveOccurred())
 
 			// VMaaS StorageClass should still be resolved on the Tenant
-			tenant := &v1alpha1.Tenant{}
 			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
 			Expect(tenant.Status.StorageClasses).To(HaveLen(1))
 			Expect(tenant.Status.StorageClasses[0].Name).To(Equal(tenantName + "-vmaas-sc"))
+			Expect(tenant.Status.ClusterStorage).To(ConsistOf(
+				v1alpha1.ClusterStorageStatus{
+					ClusterName: co.Name,
+					Ready:       true,
+					Reason:      v1alpha1.TenantReasonFound,
+				},
+				v1alpha1.ClusterStorageStatus{
+					ClusterName: string(mcmanager.LocalCluster),
+					Ready:       true,
+					Reason:      v1alpha1.TenantReasonFound,
+				},
+			))
 
 			clusterCond := tenant.GetStatusCondition(v1alpha1.TenantConditionClusterStorageReady)
 			Expect(clusterCond).NotTo(BeNil())

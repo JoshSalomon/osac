@@ -23,7 +23,6 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
-	"github.com/osac-project/osac/fulfillment-service/internal/events"
 	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
@@ -31,7 +30,6 @@ import (
 
 type BareMetalInstancesServerBuilder struct {
 	logger            *slog.Logger
-	notifier          events.Notifier
 	attributionLogic  auth.AttributionLogic
 	tenancyLogic      auth.TenancyLogic
 	metricsRegisterer prometheus.Registerer
@@ -56,12 +54,6 @@ func NewBareMetalInstancesServer() *BareMetalInstancesServerBuilder {
 // SetLogger sets the logger to use. This is mandatory.
 func (b *BareMetalInstancesServerBuilder) SetLogger(value *slog.Logger) *BareMetalInstancesServerBuilder {
 	b.logger = value
-	return b
-}
-
-// SetNotifier sets the notifier to use. This is optional.
-func (b *BareMetalInstancesServerBuilder) SetNotifier(value events.Notifier) *BareMetalInstancesServerBuilder {
-	b.notifier = value
 	return b
 }
 
@@ -102,7 +94,13 @@ func (b *BareMetalInstancesServerBuilder) Build() (result *BareMetalInstancesSer
 	inMapper, err := NewGenericMapper[*publicv1.BareMetalInstance, *privatev1.BareMetalInstance]().
 		SetLogger(b.logger).
 		SetStrict(true).
-		AddIgnoredFields("osac.public.v1.BareMetalInstanceStatus.state_transition_time").
+		AddIgnoredFields(
+			"osac.public.v1.BareMetalInstanceStatus.state_transition_time",
+			// The system sets the worker attribution fields once, at creation; users can read
+			// them but never supply them.
+			"osac.public.v1.BareMetalInstanceStatus.cluster",
+			"osac.public.v1.BareMetalInstanceStatus.node_set",
+		).
 		Build()
 	if err != nil {
 		return
@@ -117,7 +115,6 @@ func (b *BareMetalInstancesServerBuilder) Build() (result *BareMetalInstancesSer
 
 	delegate, err := NewPrivateBareMetalInstancesServer().
 		SetLogger(b.logger).
-		SetNotifier(b.notifier).
 		SetAttributionLogic(b.attributionLogic).
 		SetTenancyLogic(b.tenancyLogic).
 		SetMetricsRegisterer(b.metricsRegisterer).
@@ -245,8 +242,9 @@ func (s *BareMetalInstancesServer) Update(ctx context.Context,
 		return
 	}
 	for _, path := range request.GetUpdateMask().GetPaths() {
-		if path == "status" || path == "status.state_transition_time" {
-			err = grpcstatus.Errorf(grpccodes.InvalidArgument, "status.state_transition_time is output-only")
+		if path == "status" || path == "status.state_transition_time" ||
+			path == "status.cluster" || path == "status.node_set" {
+			err = grpcstatus.Errorf(grpccodes.InvalidArgument, "%s is output-only", path)
 			return
 		}
 	}

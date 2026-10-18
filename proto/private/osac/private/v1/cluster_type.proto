@@ -19,14 +19,16 @@ import "buf/validate/validate.proto";
 import "cleanapi/cleanapi.proto";
 import "google/api/field_behavior.proto";
 import "google/protobuf/any.proto";
+import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
+import "osac/private/v1/add_on_operator_type.proto";
+import "osac/private/v1/baremetal_instance_type_type.proto";
 import "osac/private/v1/cluster_catalog_item_type.proto";
 import "osac/private/v1/cluster_common_type.proto";
 import "osac/private/v1/cluster_template_type.proto";
 import "osac/private/v1/cluster_version_type.proto";
 import "osac/private/v1/condition_status_type.proto";
 import "osac/private/v1/metadata_type.proto";
-import "osac/private/v1/host_type_type.proto";
 import "osac/private/v1/secret_type.proto";
 
 option (cleanapi.file).package = "osac.public.v1";
@@ -97,13 +99,13 @@ message ClusterSpec {
 
   // Desired node sets of the cluster.
   //
-  // This will be automatically set by the system when the cluster is initially created, according to the template
-  // selected by the user, and can be later modified to change the size.
+  // At creation, supply at least one node set with a positive size and a BareMetalInstanceType reference,
+  // or select a catalog item whose node-set policy supplies the map. Templates do not select hardware.
+  // Users may later change the size of an existing node set.
   //
   // The key of the map is the unique identifier of the node set for this cluster.
   //
-  // For example, a cluster created with two different node sets, one for nodes without GPUs and another for nodes with
-  // GPUs could be represented like this:
+  // For example, a cluster with CPU and GPU node sets could be represented like this:
   //
   // ```json
   // {
@@ -111,11 +113,11 @@ message ClusterSpec {
   //   "spec": {
   //     "node_sets": {
   //       "compute": {
-  //         "host_type": "acme_1tb",
+  //         "baremetal_instance_type": {"name": "acme-1tb"},
   //         "size": 3
   //       },
   //       "gpu": {
-  //         "host_type": "acme_1tb_h100",
+  //         "baremetal_instance_type": {"name": "acme-1tb-h100"},
   //         "size": 3
   //       }
   //     }
@@ -124,11 +126,11 @@ message ClusterSpec {
   //     "state": "CLUSTER_STATE_READY",
   //     "node_sets": {
   //       "compute": {
-  //         "host_type": "acme_1tb",
+  //         "baremetal_instance_type": {"name": "acme-1tb"},
   //         "size": 3
   //       },
   //       "gpu": {
-  //         "host_type": "acme_1tb_h100",
+  //         "baremetal_instance_type": {"name": "acme-1tb-h100"},
   //         "size": 3
   //       }
   //     }
@@ -136,7 +138,7 @@ message ClusterSpec {
   // }
   // ```
   //
-  // The user will not be allowed to change the `host_type` field.
+  // The user cannot change `baremetal_instance_type` on an existing node set.
   //
   // The user will be allowed to add new node sets.
   //
@@ -148,7 +150,11 @@ message ClusterSpec {
   // If at any time the system can't allocate the number of nodes requested by the user, because of permissions, quota,
   // availability of resources or system errors, the cluster will be marked as degraded, and the details will be in the
   // `DEGRADED` condition.
-  map<string, ClusterNodeSet> node_sets = 3;
+  map<string, ClusterNodeSet> node_sets = 3 [(buf.validate.field).map.keys.string = {
+    min_len: 1,
+    max_len: 63,
+    pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+  }];
 
   // SSH public key installed into the `authorized_keys` file on cluster worker nodes.
   //
@@ -181,8 +187,8 @@ message ClusterSpec {
   // When not provided, the system will populate this field with the tenant's default subnet and security groups during
   // cluster creation.
   //
-  // The `subnet` field is immutable after creation. The `security_groups` field can be updated.
-  ClusterNetworkAttachment network_attachment = 9;
+  // The complete attachment, including subnet and security group references, is immutable after creation.
+  ClusterNetworkAttachment network_attachment = 9 [(google.api.field_behavior) = IMMUTABLE];
 
   // When true, the system automatically creates two ExternalIPs and two ExternalIPAttachments
   // (one for the API server endpoint, one for the ingress endpoint) during cluster creation.
@@ -197,6 +203,28 @@ message ClusterSpec {
   // must exist in the same tenant. When unset, a shared Secret may be inherited if the shared template provides it as
   // the default pull secret.
   SecretLocalReference pull_secret_secret = 11;
+
+  // Add-on operators requested for the cluster. The field is immutable after creation.
+  repeated AddOnOperatorReference add_on_operators = 12 [
+    (google.api.field_behavior) = IMMUTABLE,
+    (buf.validate.field).repeated.max_items = 32
+  ];
+}
+
+// The per-operator status contains the installation state of one add-on operator.
+message AddOnOperatorStatus {
+  string name = 1;
+  AddOnOperatorInstallState state = 2;
+  string message = 3;  // Empty on success; bounded error summary on failure.
+}
+
+// States used to describe add-on operator installation.
+enum AddOnOperatorInstallState {
+  ADD_ON_OPERATOR_INSTALL_STATE_UNSPECIFIED = 0;
+  ADD_ON_OPERATOR_INSTALL_STATE_PENDING = 1;
+  ADD_ON_OPERATOR_INSTALL_STATE_INSTALLING = 2;
+  ADD_ON_OPERATOR_INSTALL_STATE_INSTALLED = 3;
+  ADD_ON_OPERATOR_INSTALL_STATE_FAILED = 4;
 }
 
 // The status contains the details of the cluster provided by the system.
@@ -258,7 +286,11 @@ message ClusterStatus {
   // is in progress, or if the system can't apply the changes requested by the user.
   //
   // The key of the map is the unique identifier of the node set for this cluster.
-  map<string, ClusterNodeSet> node_sets = 5;
+  map<string, ClusterNodeSet> node_sets = 5 [(buf.validate.field).map.keys.string = {
+    min_len: 1,
+    max_len: 63,
+    pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+  }];
 
   // Internal API server VIP allocated by MetalLB for the cluster.
   //
@@ -295,6 +327,89 @@ message ClusterStatus {
 
   // Identifier of the hub that was selected for this cluster.
   string hub = 11 [(cleanapi.field).private = true];
+
+  // Per-operator installation state, synced from the ClusterOrder's
+  // AddOnOperatorJobs via the feedback controller.
+  repeated AddOnOperatorStatus add_on_operators = 12;
+
+  // OpenShift version observed on the hosted control plane.
+  string observed_cp_version = 13 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  reserved 14;
+  reserved "upgrade";
+
+  // Component upgrade attempts in acceptance order. The last entry is the current or most recent attempt.
+  repeated ClusterUpgradeHistoryEntry upgrade_history = 15 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Records when fulfillment accepted a change to spec.version. This is the authoritative
+  // timestamp of the version transition: metering splits version-dimensioned usage at this
+  // time. It is set in the same transaction that applies the new version and is not re-stamped
+  // while the version stays the same.
+  //
+  // This will be empty if spec.version has never changed since creation.
+  optional google.protobuf.Timestamp version_transition_time = 16 [(google.api.field_behavior) = OUTPUT_ONLY];
+}
+
+// State of a component upgrade attempt, independent of the cluster's readiness state.
+enum ClusterUpgradeState {
+  // No upgrade state has been reported. Accepted attempts start in PENDING.
+  CLUSTER_UPGRADE_STATE_UNSPECIFIED = 0;
+
+  // OSAC accepted the attempt, but HyperShift has not reported that the selected component started upgrading.
+  CLUSTER_UPGRADE_STATE_PENDING = 1;
+
+  // HyperShift is working toward the requested version of the selected component.
+  CLUSTER_UPGRADE_STATE_PROGRESSING = 2;
+
+  // The attempt did not reach a definitive result within the timeout. This may be recorded as a terminal history
+  // outcome, but observation continues and a later HyperShift result can update this attempt to SUCCEEDED or FAILED.
+  CLUSTER_UPGRADE_STATE_TIMED_OUT = 3;
+
+  // HyperShift completed the upgrade and the selected component reached the requested version.
+  CLUSTER_UPGRADE_STATE_SUCCEEDED = 4;
+
+  // HyperShift reported a terminal error and stopped working toward the requested version.
+  CLUSTER_UPGRADE_STATE_FAILED = 5;
+}
+
+// Identifies the control plane or a node set within the Cluster being upgraded.
+message ClusterUpgradeComponent {
+  oneof target {
+    option (buf.validate.oneof).required = true;
+
+    // Selects the Cluster's control plane.
+    google.protobuf.Empty control_plane = 1;
+
+    // ID of the selected node set, as keyed in the Cluster's spec.node_sets.
+    string node_set_id = 2 [(buf.validate.field).string.min_len = 1];
+  }
+}
+
+// State and progress of one component upgrade attempt.
+message ClusterUpgradeHistoryEntry {
+  // Control plane or node set selected for this attempt.
+  ClusterUpgradeComponent component = 1 [(buf.validate.field).required = true];
+
+  // OpenShift version observed on the selected component when the attempt was accepted, as a semver string.
+  string source_version = 2;
+
+  // OpenShift version requested for the selected component, as a semver string.
+  string target_version = 3;
+
+  // Time OSAC accepted the attempt.
+  google.protobuf.Timestamp accepted_time = 4;
+
+  // Time this attempt last changed state, including a later update after TIMED_OUT.
+  google.protobuf.Timestamp last_state_time = 5;
+
+  // Current outcome or progress state of this attempt.
+  ClusterUpgradeState state = 6;
+
+  // Human-readable explanation of the state, including any failure or timeout reason.
+  string message = 7;
+
+  // Identifier correlating this history entry with private operator feedback.
+  string attempt_id = 8 [(cleanapi.field).private = true];
 }
 
 // Represents the overall state of a cluster.
@@ -369,44 +484,43 @@ enum ClusterConditionType {
 
   // Indicates that the cluster is degraded.
   CLUSTER_CONDITION_TYPE_DEGRADED = 4;
+
+  // Indicates that provisioning of one or more worker nodes has failed. Automatic retries may still be in progress;
+  // this does not imply that the cluster as a whole is unusable. The message contains the number of failed workers
+  // and, when available, retry attempt counts and next retry times, without infrastructure identifiers or backend errors.
+  CLUSTER_CONDITION_TYPE_WORKER_PROVISIONING_FAILED = 5;
+
+  // Indicates that worker provisioning cannot proceed because an infrastructure prerequisite is not ready, such as
+  // the provisioning environment or the required RHCOS image. Cloud Infrastructure Admin intervention is required.
+  // The message provides a generic explanation without exposing infrastructure details.
+  CLUSTER_CONDITION_TYPE_WORKER_PROVISIONING_BLOCKED = 6;
 }
 
-// Defines a set of nodes that are part of the cluster, all of them of the same type of host.
+// Defines a set of cluster nodes sharing the same bare metal instance type.
 message ClusterNodeSet {
-  // Identifier of the type of hosts that are part of the set.
-  //
-  // The details of the host type can be obtained using the `List` and `Get` method of the `HostTypes` service. For
-  // example, to get the details of the `acme_1tb` host type using the HTTP+JSON version of the API:
-  //
-  // ```http
-  // GET /api/fulfillment/v1/host_types/acme_1tb
-  // ```
-  //
-  // Which will return something like this:
-  //
-  // ```json
-  // {
-  //   "id": "acme_1tb",
-  //   "title": "ACME server with 1 TiB of RAM and no GPU",
-  //   "description": "ACME server model XYZ with 1 TiB of RAM, 2 Xeon 6 CPUS and no GPU."
-  // }
-  // ```
-  //
-  // This will be set by the system when the cluster is initially created, according to the template selected by the
-  // user.
-  //
-  // The user will not have permission to change this field.
-  HostTypeReference host_type = 1;
+  reserved 1;
+  reserved "host_type";
 
   // Number of nodes of the set.
   optional int32 size = 2 [(buf.validate.field).int32.gt = 0];
 
-  // Name of the network interface on the HostType used for tenant fabric traffic.
+  // Name of the network port on the BareMetalInstanceType used for tenant fabric traffic.
   //
-  // System-populated during cluster creation by selecting the first interface with
-  // role "fabric" from the HostType's interfaces list. Not user-settable.
+  // System-populated during cluster creation by selecting the first network port with
+  // role "fabric" from the BareMetalInstanceType's network ports. Not user-settable.
   // Empty when the cluster has no network_attachment.
   string fabric_interface = 3 [(cleanapi.field).private = true];
+
+  // BareMetalInstanceType (hardware profile) for the nodes in this set.
+  //
+  // Immutable after creation.
+  BareMetalInstanceTypeReference baremetal_instance_type = 4 [(google.api.field_behavior) = IMMUTABLE];
+
+  // Desired OpenShift version of this node set.
+  ClusterVersionReference version = 5;
+
+  // OpenShift version observed on this node set. Populated only in Cluster status.
+  string observed_version = 6 [(google.api.field_behavior) = OUTPUT_ONLY];
 }
 
 // Local reference to a Cluster resource.

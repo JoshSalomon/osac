@@ -40,7 +40,7 @@ type ComputeInstanceFeedbackReconciler struct {
 }
 
 // NewComputeInstanceFeedbackReconciler creates a reconciler that sends to the fulfillment service updates about compute instances.
-func NewComputeInstanceFeedbackReconciler(hubClient clnt.Client, grpcConn *grpc.ClientConn, computeInstanceNamespace string) *ComputeInstanceFeedbackReconciler {
+func NewComputeInstanceFeedbackReconciler(hubClient clnt.Client, grpcConn grpc.ClientConnInterface, computeInstanceNamespace string) *ComputeInstanceFeedbackReconciler {
 	return &ComputeInstanceFeedbackReconciler{
 		bridge:                   newComputeInstanceFeedbackBridge(hubClient, privatev1.NewComputeInstancesClient(grpcConn)),
 		computeInstanceNamespace: computeInstanceNamespace,
@@ -95,7 +95,9 @@ func newComputeInstanceFeedbackBridge(hubClient clnt.Client, ciClient privatev1.
 			_, err := ciClient.Update(ctx, privatev1.ComputeInstancesUpdateRequest_builder{
 				Object: remote,
 				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{
-					"status.conditions", feedbackStatusStatePath, "status.external_ip_address", "status.internal_ip_address", "status.last_restarted_at",
+					feedbackStatusConditionsPath, feedbackStatusStatePath,
+					"status.external_ip_address", "status.internal_ip_address",
+					"status.compute_network_attachment_statuses", "status.last_restarted_at",
 				}},
 			}.Build())
 			return err
@@ -206,6 +208,14 @@ func findComputeInstanceCondition(remote *privatev1.ComputeInstance, kind privat
 func syncCIIPAddresses(obj *ckv1alpha1.ComputeInstance, remote *privatev1.ComputeInstance) {
 	remote.GetStatus().SetExternalIpAddress(obj.Status.ExternalIPAddress)
 	remote.GetStatus().SetInternalIpAddress(obj.Status.IPAddress)
+	statuses := make([]*privatev1.ComputeNetworkAttachmentStatus, 0, len(obj.Status.ComputeNetworkAttachmentStatuses))
+	for _, status := range obj.Status.ComputeNetworkAttachmentStatuses {
+		statuses = append(statuses, privatev1.ComputeNetworkAttachmentStatus_builder{
+			SubnetRef: status.SubnetRef,
+			IpAddress: status.IPAddress,
+		}.Build())
+	}
+	remote.GetStatus().SetComputeNetworkAttachmentStatuses(statuses)
 }
 
 func syncCILastRestartedAt(obj *ckv1alpha1.ComputeInstance, remote *privatev1.ComputeInstance) {

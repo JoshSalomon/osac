@@ -372,7 +372,10 @@ helm-lint: ## Lint all charts
 	helm lint $(DEPS_CHART)
 	helm lint $(INFRA_CHART)
 	helm dependency build $(OSAC_CHART)
-	helm lint $(OSAC_CHART)
+	# Match CI's example hostnames; deployment provides real values separately.
+	helm lint $(OSAC_CHART) \
+		--set service.externalHostname=fulfillment-api.example.com \
+		--set service.internalHostname=fulfillment-internal-api.example.com
 
 .PHONY: helm-template
 helm-template: ## Dry-run render all templates

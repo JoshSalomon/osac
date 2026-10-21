@@ -34,4 +34,9 @@ kind-load-image: ## Load the built image into the dev-full Kind cluster.
 kind-build-load-image: image-build ## Build the image and load it into the dev-full Kind cluster.
 	$(call kind-load-image,$(IMG))
 
-include $(shell git rev-parse --show-toplevel)/osac-installer/scripts/dev-full/kind-load-image.mk
+# Derive the repo root from this Makefile's location rather than git: the
+# Carbonite sandbox mounts the worktree without its host-only gitdir, so
+# `git rev-parse --show-toplevel` fails there and the include path collapses.
+OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+
+include $(OSAC_REPO_ROOT)/osac-installer/scripts/dev-full/kind-load-image.mk

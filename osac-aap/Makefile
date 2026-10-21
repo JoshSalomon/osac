@@ -56,4 +56,9 @@ execution-environment-push:
 kind-load-image: ## Load the built execution-environment image into dev-full Kind.
 	$(call kind-load-image,$(IMG))
 
-include $(shell git rev-parse --show-toplevel)/osac-installer/scripts/dev-full/kind-load-image.mk
+# Derive the repo root from this Makefile's location rather than git: the
+# Carbonite sandbox mounts the worktree without its host-only gitdir, so
+# `git rev-parse --show-toplevel` fails there and the include path collapses.
+OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+
+include $(OSAC_REPO_ROOT)/osac-installer/scripts/dev-full/kind-load-image.mk

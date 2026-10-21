@@ -607,8 +607,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.action not in ("revoke", "upgrade"):
         args.gateway = args.gateway or "openshell"
-        args.workspace = args.workspace or "default"
-        args.sandbox = args.sandbox or "osac-carbonite"
+        args.workspace = args.workspace or "osac-kind"
+        args.sandbox = args.sandbox or "osac-carbonite-kind"
     home = pathlib.Path.home()
     paths = _paths(home)
     try:

@@ -867,7 +867,7 @@ class ManagerTests(unittest.TestCase):
              mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
              mock.patch.object(self.manager, "_host_key", return_value="osac-host-build ssh-ed25519 AAAAhost\n"), \
              mock.patch.object(self.manager, "_run", side_effect=self._fake_keygen):
-            self.manager.enable(paths, "openshell", "default", "osac-carbonite", self.checkout)
+            self.manager.enable(paths, "openshell", "osac-kind", "osac-carbonite-kind", self.checkout)
             self.manager.remove_authorized_key(paths["authorized"])
             with contextlib.redirect_stderr(stderr):
                 self.assertEqual(1, self.manager.main(["status", "--checkout", str(self.checkout)]))

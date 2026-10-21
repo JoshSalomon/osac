@@ -19,17 +19,20 @@ UI_TAG = "ghcr.io/osac-project/osac-ui:latest"
 MAX_CONTAINERFILE = 1024 * 1024
 # (context below checkout, Containerfile below context, tag, pre-file flags,
 # post-tag flags). Every value is installed host code, never an SSH argument.
+# Contexts mirror each Containerfile's documented build context: all but
+# devstack-cli-tools COPY repo-root-relative paths (go.work, osac-ui/...), so
+# their context is the checkout root itself.
 BUILD_ACTIONS = {
-    "ui": (("osac-ui",), ("Containerfile",), UI_TAG, (), ()),
+    "ui": ((), ("osac-ui", "Containerfile"), UI_TAG, (), ()),
     "fulfillment": ((), ("fulfillment-service", "Containerfile"),
                     "ghcr.io/osac-project/fulfillment-service:latest", (), ("--build-arg", "VERSION=")),
     "operator": ((), ("osac-operator", "Containerfile"),
                  "ghcr.io/osac-project/osac-operator:latest", (), ()),
     "metering-service": ((), ("osac-metering", "metering-service", "Containerfile"),
                          "ghcr.io/osac-project/metering-service:latest", (), ()),
-    "metering-m360": (("osac-metering",), ("adapters", "Containerfile.m360-adapter"),
+    "metering-m360": ((), ("osac-metering", "adapters", "Containerfile.m360-adapter"),
                       "ghcr.io/osac-project/metering-m360-adapter:latest", (), ()),
-    "metering-echo": (("osac-metering",), ("adapters", "Containerfile.echo-adapter"),
+    "metering-echo": ((), ("osac-metering", "adapters", "Containerfile.echo-adapter"),
                       "ghcr.io/osac-project/metering-echo-adapter:latest", (), ()),
     "devstack-cli-tools": (("osac-installer", "charts", "osac-devstack"),
                            ("Containerfile.cli-tools",), "ghcr.io/osac-project/cli-tools:latest",

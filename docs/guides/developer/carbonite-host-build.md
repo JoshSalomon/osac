@@ -27,7 +27,7 @@ sandbox remains deferred.
 
    ```bash
    tools/carbonite/enable-host-build.sh \
-     --gateway openshell --workspace default --sandbox osac-carbonite \
+     --gateway openshell --workspace osac-kind --sandbox osac-carbonite-kind \
      --checkout "$PWD"
    ```
 
@@ -38,13 +38,17 @@ sandbox remains deferred.
    Carbonite image, or in `tools/bootstrap.sh`. It binds this opt-in to the
    gateway, workspace, sandbox, and canonical checkout. Re-running the
    enabler is not part of ordinary shell startup; use the installed host-only
-   manager for later maintenance.
+   manager for later maintenance. The binding flags must match the root
+   Makefile's `CARBONITE_GATEWAY`, `CARBONITE_WORKSPACE`, and `CARBONITE_NAME`
+   values that `make enter-carb` passes; the values above are those defaults.
 4. Enter through `make enter-carb` (or `make claude-carb`). On each entry, the
    installed manager rechecks that binding, adds only the required OpenShell
    `/usr/bin/ssh` access to `host.openshell.internal:22`, uploads the short-lived
    sandbox copy of the key and host pin, and sends a side-effect-free `probe`.
    It repeats this reconciliation after sandbox recreation without generating
-   a new host key pair. If preparation fails, shell entry fails closed.
+   a new host key pair. If preparation fails, shell entry fails closed, the
+   manager removes the host key authorization, and the error output names the
+   exact `enable` command that restores it (see [Revoke or repair](#revoke-or-repair)).
 5. Inside Carbonite, run `make -C osac-ui`. This sends the literal `ui` action
    over SSH. The installed host dispatcher builds the fixed image
    `ghcr.io/osac-project/osac-ui:latest` from the bound checkout's
@@ -77,6 +81,12 @@ The CLI-tools recipe builds a local manifest containing both `linux/amd64` and
 ordinary host/Distrobox push target uses `podman manifest push --all` to publish
 both. The devstack `push-cli-tools` and `build-push-cli-tools` targets fail
 inside Carbonite before building or pushing.
+
+`osac-aap` execution-environment builds are deferred. Their current Make
+target runs `uv` and `ansible-builder` on the host. The future approach is to
+generate the EE context inside Carbonite, transfer it to validated host-owned
+staging, then request a fixed host image build. That transfer and staging
+boundary must be tested before enabling the action.
 
 ## What the SSH channel permits
 
@@ -129,7 +139,7 @@ again:
 "$HOME/.local/libexec/osac-host-build-manager" revoke
 tools/carbonite/enable-host-build.sh --upgrade
 tools/carbonite/enable-host-build.sh \
-  --gateway openshell --workspace default --sandbox osac-carbonite \
+  --gateway openshell --workspace osac-kind --sandbox osac-carbonite-kind \
   --checkout "$PWD"
 ```
 
@@ -154,12 +164,42 @@ with its original binding to restore authorization, then enter again:
 
 ```bash
 "$HOME/.local/libexec/osac-host-build-manager" enable \
-  --gateway openshell --workspace default --sandbox osac-carbonite \
+  --gateway openshell --workspace osac-kind --sandbox osac-carbonite-kind \
   --checkout "$PWD"
 ```
 
-`osac-aap` execution-environment builds are deferred. Their current Make
-target runs `uv` and `ansible-builder` on the host. The future approach is to
-generate the EE context inside Carbonite, transfer it to validated host-owned
-staging, then request a fixed host image build. That transfer and staging
-boundary must be tested before enabling the action.
+### Entry fails with `Permission denied (publickey, ...)`
+
+`make enter-carb` (or `make claude-carb`) ending in
+
+```
+host-build prepare failed: host-build probe failed: <user>@host.openshell.internal:
+Permission denied (publickey,gssapi-keyex,gssapi-with-mic,password).
+```
+
+almost always means the marked host-build key is no longer in the host
+account's `~/.ssh/authorized_keys`. Any failed preparation removes it on
+purpose (entry fails closed), so one transient failure — for example, the
+OpenShell policy rule not yet enforced when the probe connects — leaves every
+later entry rejected until the authorization is restored. The failing
+`prepare`, and `make check-carb` through `manager status`, report this
+condition directly and print the exact restore command for the bound
+gateway, workspace, sandbox, and checkout.
+
+Restore the authorization with the **installed** manager using that printed
+command, then enter again. To inspect the state by hand:
+
+```bash
+~/.local/libexec/osac-host-build-manager status \
+  --gateway openshell --workspace osac-kind --sandbox osac-carbonite-kind \
+  --checkout "$PWD"
+grep osac-carbonite-host-build ~/.ssh/authorized_keys
+journalctl -u sshd --since today
+```
+
+The grep should show exactly one marked line. A note for reading the journal:
+recent OpenSSH clients first ask the server whether a key would be accepted
+and only sign an attempt if the answer is yes, so a rejected build key never
+produces a `Failed publickey` line — the connection is logged only as closed
+during preauthentication. That is expected for this condition; it does not
+mean the client failed to offer the key.

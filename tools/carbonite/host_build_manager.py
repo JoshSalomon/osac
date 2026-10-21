@@ -13,6 +13,7 @@ import os
 import pathlib
 import pwd
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -25,6 +26,10 @@ RULE = "osac-host-build"
 KEY_NAME = "osac-host-build"
 SAFE_FORCED_PATH = re.compile(r"\A/[A-Za-z0-9_./-]+\Z")
 READY = "OSAC_HOST_BUILD_READY"
+EXEC_TIMEOUT_SECONDS = 30
+SSH_CONNECT_TIMEOUT_SECONDS = 5
+DOCS_URL = ("https://github.com/osac-project/osac/blob/main/docs/guides/"
+            "developer/carbonite-host-build.md#revoke-or-repair")
 
 
 def _require_regular(path, *, owner=True, writable=False):
@@ -107,8 +112,9 @@ def install_authorized_key(path, public_key, dispatcher):
 
 
 def remove_authorized_key(path):
+    """Remove our marked entry; report whether authorized_keys changed."""
     if not path.exists() and not path.is_symlink():
-        return
+        return False
     _require_regular(path, writable=True)
     lines = path.read_text().splitlines(keepends=True)
     ours = [line for line in lines if MARKER in line]
@@ -117,6 +123,43 @@ def remove_authorized_key(path):
     updated = "".join(line for line in lines if MARKER not in line)
     if updated != "".join(lines):
         _atomic_write(path, updated.encode(), 0o600)
+        return True
+    return False
+
+
+def _recovery_hint(paths, gateway, workspace, sandbox, checkout):
+    """Name the exact reauthorization command for a validated binding."""
+    return ("restore it with the installed manager:\n  " + shlex.join(
+        [str(paths["manager"]), "enable", "--gateway", gateway, "--workspace", workspace,
+         "--sandbox", sandbox, "--checkout", str(checkout)])
+        + "\nSee \"Revoke or repair\" in docs/guides/developer/carbonite-host-build.md\n"
+        + DOCS_URL)
+
+
+def _require_authorized(paths, data):
+    """Fail with the recovery command unless our marked key is still authorized."""
+    hint = _recovery_hint(paths, data["gateway"], data["workspace"],
+                          data["sandbox"], data["checkout"])
+    try:
+        expected = paths["key"].with_suffix(".pub").read_text().split()[1]
+    except (OSError, IndexError):
+        raise ValueError("the installed host-build key pair is incomplete; revoke and enable it again\n"
+                         "See \"Revoke or repair\" in docs/guides/developer/carbonite-host-build.md\n"
+                         + DOCS_URL) from None
+    authorized = paths["authorized"]
+    if authorized.exists() or authorized.is_symlink():
+        _require_regular(authorized, writable=True)
+        marked = [line for line in authorized.read_text().splitlines() if MARKER in line]
+    else:
+        marked = []
+    if len(marked) > 1 or any(not line.rstrip().endswith(" " + MARKER) for line in marked):
+        raise ValueError("conflicting host-build authorized_keys marker; inspect " + str(authorized))
+    if not marked:
+        raise ValueError("the host-build key authorization is missing from " + str(authorized)
+                         + " (a failed prepare removes it; entry fails closed)\n" + hint)
+    if marked[0].split()[-2] != expected:
+        raise ValueError("the host-build key authorization in " + str(authorized)
+                         + " does not match the installed host-build key\n" + hint)
 
 
 def _paths(home):
@@ -350,11 +393,29 @@ def _bound(paths, gateway, workspace, sandbox, checkout):
     _require_regular(paths["key"])
     _require_regular(paths["known_hosts"])
     _require_regular(paths["user"])
+    _require_authorized(paths, data)
     return data
 
 
 def _openshell_args(gateway, workspace, *args):
     return ["/usr/bin/openshell", "--gateway", gateway, "--workspace", workspace, *args]
+
+
+def _sandbox_exec_args(gateway, workspace, sandbox, *command):
+    return _openshell_args(
+        gateway,
+        workspace,
+        "sandbox",
+        "exec",
+        "--name",
+        sandbox,
+        "--no-login-shell",
+        "--no-tty",
+        "--timeout",
+        str(EXEC_TIMEOUT_SECONDS),
+        "--",
+        *command,
+    )
 
 
 def _sandbox_matches(gateway, workspace, sandbox):
@@ -389,10 +450,8 @@ def _cleanup_sandbox(gateway, workspace, sandbox):
         if _sandbox_policy(gateway, workspace, sandbox):
             raise ValueError("host-build network rule remains after removal")
     for remote in ("/sandbox/.ssh/osac-host-build", "/sandbox/.ssh/osac-host-build-known_hosts", "/sandbox/.ssh/osac-host-build-user"):
-        _run(_openshell_args(gateway, workspace, "sandbox", "exec", "--name", sandbox,
-                            "--no-login-shell", "--no-tty", "--", "/usr/bin/rm", "-f", remote))
-        _run(_openshell_args(gateway, workspace, "sandbox", "exec", "--name", sandbox,
-                            "--no-login-shell", "--no-tty", "--", "/usr/bin/test", "!", "-e", remote))
+        _run(_sandbox_exec_args(gateway, workspace, sandbox, "/usr/bin/rm", "-f", remote))
+        _run(_sandbox_exec_args(gateway, workspace, sandbox, "/usr/bin/test", "!", "-e", remote))
 
 
 def prepare(paths, gateway, workspace, sandbox, checkout):
@@ -408,10 +467,8 @@ def prepare(paths, gateway, workspace, sandbox, checkout):
                                 "--binary", "/usr/bin/ssh", "--rule-name", RULE, "--wait")
         try:
             _run(policy)
-            _run(_openshell_args(gateway, workspace, "sandbox", "exec", "--name", sandbox,
-                                "--no-login-shell", "--no-tty", "--", "/usr/bin/test", "!", "-L", "/sandbox/.ssh"))
-            _run(_openshell_args(gateway, workspace, "sandbox", "exec", "--name", sandbox,
-                                "--no-login-shell", "--no-tty", "--", "/usr/bin/install", "-d", "-m", "700", "/sandbox/.ssh"))
+            _run(_sandbox_exec_args(gateway, workspace, sandbox, "/usr/bin/test", "!", "-L", "/sandbox/.ssh"))
+            _run(_sandbox_exec_args(gateway, workspace, sandbox, "/usr/bin/install", "-d", "-m", "700", "/sandbox/.ssh"))
             for local, remote in ((paths["key"], "/sandbox/.ssh/osac-host-build"),
                                   (paths["known_hosts"], "/sandbox/.ssh/osac-host-build-known_hosts"),
                                   (paths["user"], "/sandbox/.ssh/osac-host-build-user")):
@@ -419,35 +476,43 @@ def prepare(paths, gateway, workspace, sandbox, checkout):
                 if _sandbox_matches(gateway, workspace, sandbox) != identity:
                     raise ValueError("sandbox was recreated during key upload")
                 for target in ("/sandbox/.ssh", remote):
-                    _run(_openshell_args(gateway, workspace, "sandbox", "exec", "--name", sandbox,
-                                        "--no-login-shell", "--no-tty", "--", "/usr/bin/test", "!", "-L", target))
+                    _run(_sandbox_exec_args(gateway, workspace, sandbox, "/usr/bin/test", "!", "-L", target))
                 _run(_openshell_args(gateway, workspace, "sandbox", "upload", sandbox, str(local), remote))
-            _run(_openshell_args(gateway, workspace, "sandbox", "exec", "--name", sandbox,
-                                "--no-login-shell", "--no-tty", "--", "/usr/bin/chmod", "600",
-                                "/sandbox/.ssh/osac-host-build", "/sandbox/.ssh/osac-host-build-known_hosts",
-                                "/sandbox/.ssh/osac-host-build-user"))
+            _run(_sandbox_exec_args(gateway, workspace, sandbox, "/usr/bin/chmod", "600",
+                                    "/sandbox/.ssh/osac-host-build", "/sandbox/.ssh/osac-host-build-known_hosts",
+                                    "/sandbox/.ssh/osac-host-build-user"))
             ssh = ["/usr/bin/ssh", "-F", "/dev/null", "-i", "/sandbox/.ssh/osac-host-build",
                    "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
+                   "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}",
                    "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "HostKeyAlias=osac-host-build",
                    "-o", "UserKnownHostsFile=/sandbox/.ssh/osac-host-build-known_hosts",
                    "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ClearAllForwardings=yes", "-T",
                    pwd.getpwuid(os.getuid()).pw_name + "@host.openshell.internal", "probe"]
-            result = _run(_openshell_args(gateway, workspace, "sandbox", "exec", "--name", sandbox,
-                                          "--no-login-shell", "--no-tty", "--", *ssh), capture=True)
+            try:
+                result = _run(_sandbox_exec_args(gateway, workspace, sandbox, *ssh), capture=True)
+            except subprocess.CalledProcessError as error:
+                detail = (error.stderr or error.stdout or "").strip()
+                raise ValueError("host-build probe failed: " + detail) from error
             if result.stdout.strip() != READY:
                 raise ValueError("host-build probe returned an unexpected response")
         except Exception as original:
             recovery_errors = []
             # Deny the host capability before attempting sandbox cleanup. A
             # failed upload or policy operation may have left a live key there.
+            revoked = False
             try:
-                remove_authorized_key(paths["authorized"])
+                revoked = remove_authorized_key(paths["authorized"])
             except Exception as error:
                 recovery_errors.append("host key revocation: " + str(error))
             try:
                 _cleanup_sandbox(gateway, workspace, sandbox)
             except Exception as error:
                 recovery_errors.append("sandbox cleanup: " + str(error))
+            if revoked:
+                # Only enable reinstalls the line, so name that exact command
+                # instead of leaving the user with an opaque denial.
+                print("prepare removed the host-build key authorization (entry fails closed); "
+                      + _recovery_hint(paths, gateway, workspace, sandbox, checkout), file=sys.stderr)
             if recovery_errors:
                 raise ValueError("prepare failed; " + "; ".join(recovery_errors)) from original
             raise

@@ -72,6 +72,16 @@ class DispatcherTests(unittest.TestCase):
                 self.assertIn("unsupported worktree", result.stderr)
 
     def test_ui_build_has_exact_argv_cwd_and_clean_environment(self):
+        seen = []
+
+        def record(argv, **kwargs):
+            # dispatch closes its dir descriptors on return, so the context
+            # inode (the checkout root, not the osac-ui subdirectory) can
+            # only be observed here, at call time.
+            seen.append(os.stat(kwargs["cwd"]).st_ino)
+            self.calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0)
+
         with mock.patch.dict(os.environ, {
             "PATH": str(self.checkout), "BASH_ENV": "malicious", "CONTAINER_HOST": "tcp://evil",
             "DOCKER_HOST": "tcp://evil", "PYTHONPATH": str(self.checkout), "SSH_ORIGINAL_COMMAND": "ui",
@@ -79,7 +89,8 @@ class DispatcherTests(unittest.TestCase):
             "XDG_CONFIG_HOME": str(self.checkout), "CONTAINERS_CONF_OVERRIDE": str(self.checkout),
             "GIT_CONFIG_SYSTEM": str(self.checkout), "PYTHONSTARTUP": str(self.checkout),
         }):
-            self.assertEqual(0, self.dispatcher.dispatch("ui", self.checkout, self.run_command, io.StringIO()))
+            self.assertEqual(0, self.dispatcher.dispatch("ui", self.checkout, record, io.StringIO()))
+        self.assertEqual([self.checkout.stat().st_ino], seen)
         self.assertEqual(1, len(self.calls))
         argv, kwargs = self.calls[0]
         self.assertEqual(["/usr/bin/podman", "build", "-f", "-", "-t", "ghcr.io/osac-project/osac-ui:latest", "."], argv)
@@ -94,6 +105,10 @@ class DispatcherTests(unittest.TestCase):
         self.assertNotEqual(str(self.checkout), kwargs["env"]["PATH"])
 
     def test_other_fixed_build_actions_use_exact_context_file_and_arguments(self):
+        # The context column is the directory podman must build from, asserted
+        # by inode below -- a wrong BUILD_ACTIONS context (the shipped bug:
+        # component subdirectory where the Containerfile COPYs repo-root
+        # paths) redirects the build while every argv stays identical.
         recipes = (
             ("fulfillment", "fulfillment-service/Containerfile", ".",
              ["/usr/bin/podman", "build", "-f", "-", "-t", "ghcr.io/osac-project/fulfillment-service:latest",
@@ -102,9 +117,9 @@ class DispatcherTests(unittest.TestCase):
              ["/usr/bin/podman", "build", "-f", "-", "-t", "ghcr.io/osac-project/osac-operator:latest", "."]),
             ("metering-service", "osac-metering/metering-service/Containerfile", ".",
              ["/usr/bin/podman", "build", "-f", "-", "-t", "ghcr.io/osac-project/metering-service:latest", "."]),
-            ("metering-m360", "adapters/Containerfile.m360-adapter", "osac-metering",
+            ("metering-m360", "osac-metering/adapters/Containerfile.m360-adapter", ".",
              ["/usr/bin/podman", "build", "-f", "-", "-t", "ghcr.io/osac-project/metering-m360-adapter:latest", "."]),
-            ("metering-echo", "adapters/Containerfile.echo-adapter", "osac-metering",
+            ("metering-echo", "osac-metering/adapters/Containerfile.echo-adapter", ".",
              ["/usr/bin/podman", "build", "-f", "-", "-t", "ghcr.io/osac-project/metering-echo-adapter:latest", "."]),
             ("devstack-cli-tools", "Containerfile.cli-tools", "osac-installer/charts/osac-devstack",
              ["/usr/bin/podman", "build", "--platform", "linux/amd64,linux/arm64", "-f", "-", "--manifest",
@@ -116,8 +131,18 @@ class DispatcherTests(unittest.TestCase):
                 source = context_dir / containerfile
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.write_text("FROM scratch\n# " + action + "\n")
+                seen = []
+
+                def record(argv, **kwargs):
+                    # dispatch closes its dir descriptors on return, so the
+                    # context inode can only be observed here, at call time.
+                    seen.append(os.stat(kwargs["cwd"]).st_ino)
+                    self.calls.append((argv, kwargs))
+                    return subprocess.CompletedProcess(argv, 0)
+
                 self.calls.clear()
-                self.assertEqual(0, self.dispatcher.dispatch(action, self.checkout, self.run_command, io.StringIO()))
+                self.assertEqual(0, self.dispatcher.dispatch(action, self.checkout, record, io.StringIO()))
+                self.assertEqual([context_dir.stat().st_ino], seen)
                 self.assertEqual(1, len(self.calls))
                 argv, kwargs = self.calls[0]
                 self.assertEqual(expected_argv, argv)
@@ -140,16 +165,24 @@ class DispatcherTests(unittest.TestCase):
         outside = pathlib.Path(self.temp.name) / "outside"
         outside.mkdir()
         (outside / "Containerfile").write_text("FROM evil\n")
-        original_inode = (self.checkout / "osac-ui").stat().st_ino
+        # devstack-cli-tools is the one action whose context is a checkout
+        # subdirectory, so a rename+symlink swap of that directory is the
+        # redirect attempt this test must survive.
+        context = self.checkout / "osac-installer/charts/osac-devstack"
+        context.parent.mkdir(parents=True, exist_ok=True)
+        context.mkdir()
+        (context / "Containerfile.cli-tools").write_text("FROM scratch\n")
+        original_inode = context.stat().st_ino
         seen = []
 
         def swap_before_podman(argv, **kwargs):
-            (self.checkout / "osac-ui").rename(self.checkout / "former-ui")
-            (self.checkout / "osac-ui").symlink_to(outside, target_is_directory=True)
+            context.rename(self.checkout / "former-devstack")
+            context.symlink_to(outside, target_is_directory=True)
             seen.append((os.stat(kwargs["cwd"]).st_ino, kwargs["input"]))
             return subprocess.CompletedProcess(argv, 0)
 
-        self.assertEqual(0, self.dispatcher.dispatch("ui", self.checkout, swap_before_podman, io.StringIO()))
+        self.assertEqual(0, self.dispatcher.dispatch("devstack-cli-tools", self.checkout,
+                                                     swap_before_podman, io.StringIO()))
         self.assertEqual([(original_inode, b"FROM scratch\n")], seen)
 
     def test_malformed_actions_never_start_host_command(self):
@@ -376,6 +409,38 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.manager._bound(paths, "openshell", "default", "osac-carbonite", self.checkout)
 
+    def test_bound_reports_missing_authorization_with_recovery_command(self):
+        paths = self.manager._paths(self.home)
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+             mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
+             mock.patch.object(self.manager, "_host_key", return_value="osac-host-build ssh-ed25519 AAAAhost\n"), \
+             mock.patch.object(self.manager, "_run", side_effect=self._fake_keygen):
+            self.manager.enable(paths, "openshell", "default", "osac-carbonite", self.checkout)
+            self.manager.remove_authorized_key(paths["authorized"])
+            with self.assertRaises(ValueError) as raised:
+                self.manager._bound(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        message = str(raised.exception)
+        self.assertIn("the host-build key authorization is missing", message)
+        self.assertIn(" ".join([str(paths["manager"]), "enable", "--gateway", "openshell",
+                                "--workspace", "default", "--sandbox", "osac-carbonite",
+                                "--checkout", str(self.checkout)]), message)
+        self.assertIn("carbonite-host-build.md", message)
+
+    def test_bound_reports_stale_authorized_key_with_recovery_command(self):
+        paths = self.manager._paths(self.home)
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+             mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
+             mock.patch.object(self.manager, "_host_key", return_value="osac-host-build ssh-ed25519 AAAAhost\n"), \
+             mock.patch.object(self.manager, "_run", side_effect=self._fake_keygen):
+            self.manager.enable(paths, "openshell", "default", "osac-carbonite", self.checkout)
+            self.manager.install_authorized_key(paths["authorized"], "ssh-ed25519 AAAAstale test",
+                                                 paths["dispatcher"])
+            with self.assertRaises(ValueError) as raised:
+                self.manager._bound(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        message = str(raised.exception)
+        self.assertIn("does not match the installed host-build key", message)
+        self.assertIn("enable --gateway openshell", message)
+
     def test_reenable_after_revoke_rotates_key_and_keeps_unrelated_ssh(self):
         paths = self.manager._paths(self.home)
         issued = 0
@@ -533,10 +598,40 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(2, len(probes))
         for command in probes:
             self.assertIn("StrictHostKeyChecking=yes", command)
+            self.assertIn("ConnectTimeout=5", command)
             self.assertIn("HostKeyAlias=osac-host-build", command)
             self.assertIn("ClearAllForwardings=yes", command)
             self.assertNotIn("sh", command)
             self.assertNotIn("uv", command)
+        execs = [cmd for cmd in commands if "sandbox" in cmd and "exec" in cmd]
+        self.assertTrue(execs)
+        for command in execs:
+            self.assertIn("--timeout", command)
+            self.assertIn("30", command)
+
+    def test_prepare_probe_failure_surfaces_ssh_stderr(self):
+        paths = self.manager._paths(self.home)
+        paths["libexec"].mkdir(parents=True)
+        paths["config"].write_text("{}")
+        error = subprocess.CalledProcessError(
+            255,
+            "probe",
+            stderr="ssh: connect to host host.openshell.internal port 22: Permission denied\n",
+        )
+
+        def fail_probe(argv, *, capture=False):
+            if argv[-1:] == ["probe"]:
+                raise error
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        with mock.patch.object(self.manager, "_bound", return_value={}), \
+             mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
+             mock.patch.object(self.manager, "_run", side_effect=fail_probe), \
+             mock.patch.object(self.manager, "_cleanup_sandbox"):
+            with self.assertRaises(ValueError) as raised:
+                self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
+
+        self.assertIn("Permission denied", str(raised.exception))
 
     def test_prepare_failure_revokes_host_key_before_sandbox_cleanup(self):
         paths = self.manager._paths(self.home)
@@ -562,6 +657,74 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
         self.assertEqual(["ssh-ed25519 AAAAunrelated unrelated\n"], key_at_cleanup)
+
+    def test_prepare_fails_fast_without_side_effects_when_authorization_is_missing(self):
+        paths = self.manager._paths(self.home)
+        commands = []
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+             mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
+             mock.patch.object(self.manager, "_host_key", return_value="osac-host-build ssh-ed25519 AAAAhost\n"), \
+             mock.patch.object(self.manager, "_run", side_effect=self._fake_keygen):
+            self.manager.enable(paths, "openshell", "default", "osac-carbonite", self.checkout)
+            self.manager.remove_authorized_key(paths["authorized"])
+
+        def record(argv, *, capture=False):
+            commands.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        with mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
+             mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
+             mock.patch.object(self.manager, "_run", side_effect=record):
+            with self.assertRaises(ValueError) as raised:
+                self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        self.assertIn("the host-build key authorization is missing", str(raised.exception))
+        self.assertEqual([], commands)
+
+    def test_failed_prepare_prints_recovery_command_for_removed_authorization(self):
+        paths = self.manager._paths(self.home)
+        error = subprocess.CalledProcessError(
+            255, "probe",
+            stderr="jsalomon@host.openshell.internal: Permission denied (publickey).\n")
+
+        def fail_probe(argv, *, capture=False):
+            if argv[-1:] == ["probe"]:
+                raise error
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+             mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
+             mock.patch.object(self.manager, "_host_key", return_value="osac-host-build ssh-ed25519 AAAAhost\n"), \
+             mock.patch.object(self.manager, "_run", side_effect=self._fake_keygen):
+            self.manager.enable(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        with mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
+             mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
+             mock.patch.object(self.manager, "_run", side_effect=fail_probe), \
+             mock.patch.object(self.manager, "_cleanup_sandbox"):
+            with contextlib.redirect_stderr(stderr):
+                with self.assertRaises(ValueError) as raised:
+                    self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        self.assertIn("Permission denied", str(raised.exception))
+        self.assertNotIn(self.manager.MARKER, paths["authorized"].read_text())
+        notice = stderr.getvalue()
+        self.assertIn("removed the host-build key authorization", notice)
+        self.assertIn(" ".join([str(paths["manager"]), "enable", "--gateway", "openshell",
+                                "--workspace", "default", "--sandbox", "osac-carbonite",
+                                "--checkout", str(self.checkout)]), notice)
+
+    def test_status_surfaces_missing_authorization_recovery_command(self):
+        paths = self.manager._paths(self.home)
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+             mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
+             mock.patch.object(self.manager, "_host_key", return_value="osac-host-build ssh-ed25519 AAAAhost\n"), \
+             mock.patch.object(self.manager, "_run", side_effect=self._fake_keygen):
+            self.manager.enable(paths, "openshell", "default", "osac-carbonite", self.checkout)
+            self.manager.remove_authorized_key(paths["authorized"])
+            with contextlib.redirect_stderr(stderr):
+                self.assertEqual(1, self.manager.main(["status", "--checkout", str(self.checkout)]))
+        self.assertIn("the host-build key authorization is missing", stderr.getvalue())
+        self.assertIn("enable --gateway openshell", stderr.getvalue())
 
 
 if __name__ == "__main__":

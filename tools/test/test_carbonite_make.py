@@ -208,6 +208,46 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
             "status", "--output", "json",
         ], self.calls())
 
+    def test_check_reports_optional_host_build_manager_when_absent(self):
+        result = self.make("check-carb")
+        self.assertIn("Carbonite host-build manager not installed", result.stdout)
+        self.assertIn("host builds are optional", result.stdout)
+
+    def test_check_validates_installed_host_build_manager_binding(self):
+        self.install_manager()
+        result = self.make(
+            "check-carb",
+            "CARBONITE_GATEWAY=other-local",
+            "CARBONITE_WORKSPACE=development",
+        )
+        self.assertIn([
+            "manager", "status", "--gateway", "other-local", "--workspace", "development",
+            "--sandbox", "osac-carbonite-kind", "--checkout", str(self.checkout),
+        ], self.calls())
+        self.assertIn("Carbonite host-build manager OK", result.stdout)
+
+    def test_check_rejects_unsafe_host_build_manager_installations(self):
+        manager = self.home / ".local/libexec/osac-host-build-manager"
+        manager.parent.mkdir(parents=True)
+        target = self.root / "manager-target"
+        target.write_text("#!/bin/sh\nexit 0\n")
+        target.chmod(0o755)
+        manager.symlink_to(target)
+        result = self.make("check-carb", succeeds=False)
+        self.assertIn("must not be a symlink", result.stderr)
+
+        manager.unlink()
+        manager.write_text("#!/bin/sh\nexit 0\n")
+        manager.chmod(0o644)
+        result = self.make("check-carb", succeeds=False)
+        self.assertIn("not an executable file", result.stderr)
+
+    def test_check_fails_when_host_build_manager_status_fails(self):
+        self.install_manager()
+        result = self.make("check-carb", succeeds=False, OSAC_CARB_FAIL_MANAGER="1")
+        self.assertIn("Carbonite host-build manager check failed", result.stderr)
+        self.assertEqual(self.calls()[0][:2], ["manager", "status"])
+
     def test_missing_commands_fail_before_building(self):
         for variable in ("container_cmd", "openshell_cmd"):
             with self.subTest(variable=variable):

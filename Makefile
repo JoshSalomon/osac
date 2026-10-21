@@ -95,6 +95,37 @@ if [ -e "$$manager" ]; then \
 fi
 endef
 
+# Detect unsafe or stale host-build bindings before image or sandbox work; a
+# missing manager remains an ordinary opt-out. Only the standalone check-carb
+# goal runs the validation: the entry targets also run this recipe as a
+# prerequisite, and their prepare step already fails closed with a single
+# manager invocation.
+define carbonite_check_host_build_manager
+@set -eu; \
+if [ -n "$(filter check-carb,$(MAKECMDGOALS))" ]; then \
+	manager="$$HOME/.local/libexec/osac-host-build-manager"; \
+	if [ -L "$$manager" ]; then \
+		printf 'Carbonite host-build manager must not be a symlink: %s\n' "$$manager" >&2; \
+		exit 1; \
+	fi; \
+	if [ ! -e "$$manager" ]; then \
+		printf 'Carbonite host-build manager not installed; host builds are optional.\n'; \
+	elif [ ! -f "$$manager" ] || [ ! -x "$$manager" ]; then \
+		printf 'Carbonite host-build manager is not an executable file: %s\n' "$$manager" >&2; \
+		exit 1; \
+	else \
+		manager_status=0; \
+		"$$manager" status --gateway "$(CARBONITE_GATEWAY)" --workspace "$(CARBONITE_WORKSPACE)" \
+			--sandbox "$(CARBONITE_NAME)" --checkout "$$(pwd -P)" || manager_status=$$?; \
+		if [ "$$manager_status" -ne 0 ]; then \
+			printf 'Carbonite host-build manager check failed. The installed manager, binding, or credentials are invalid.\n' >&2; \
+			exit "$$manager_status"; \
+		fi; \
+		printf 'Carbonite host-build manager OK\n'; \
+	fi; \
+fi
+endef
+
 # Creation uses Carbonite's image/policy and an approved project volume.
 # Image, mount, policy and provider changes take effect after rebuild-carb.
 define ensure_carbonite
@@ -174,8 +205,9 @@ endef
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-check-carb: ## Check host commands, container engine and gateway authentication
+check-carb: ## Check host commands, engine, gateway and host-build binding
 	$(call carbonite_require_commands,"$(CONTAINER_CMD)" "$(OPENSHELL_CMD)" jq)
+	$(carbonite_check_host_build_manager)
 	$(carbonite_check_engine)
 	@set -eu; \
 	if ! gateway_status="$$( $(CARBONITE_RUN) status --output json )"; then \

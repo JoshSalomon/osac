@@ -242,6 +242,7 @@ network_policies:
         enforcement: enforce
     binaries:
       - path: /usr/local/bin/gh
+      - path: /usr/bin/gh
       - path: /usr/bin/curl
       - path: /usr/bin/git
       - path: /usr/libexec/git-core/*
@@ -268,6 +269,7 @@ network_policies:
         enforcement: enforce
     binaries:
       - path: /usr/bin/curl
+      - path: /usr/local/bin/jira
 
   rh_pattern_server:
     name: rh-pattern-server

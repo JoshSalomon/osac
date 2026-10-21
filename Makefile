@@ -32,7 +32,8 @@ DEV_CONTAINER_SUFFIX := $(if $(filter true,$(USE_CARBONITE)),carb,distrobox)
 .PHONY: image enter claude stop rm rebuild status help \
 	image-distrobox enter-distrobox claude-distrobox stop-distrobox rm-distrobox \
 	rebuild-distrobox status-distrobox \
-	check-carb image-carb enter-carb claude-carb stop-carb rm-carb rebuild-carb status-carb
+	check-carb image-carb enter-carb claude-carb stop-carb rm-carb rebuild-carb status-carb \
+	fix-carb-network
 
 define carbonite_require_commands
 @set -eu; \
@@ -91,7 +92,14 @@ if [ -e "$$manager" ]; then \
 		exit 1; \
 	fi; \
 	"$$manager" prepare --gateway "$(CARBONITE_GATEWAY)" --workspace "$(CARBONITE_WORKSPACE)" \
-		--sandbox "$(CARBONITE_NAME)" --checkout "$$(pwd -P)"; \
+		--sandbox "$(CARBONITE_NAME)" --checkout "$$(pwd -P)" || { \
+		manager_status=$$?; \
+		printf 'Carbonite host-build preparation failed. Common causes: the host-build\n' >&2; \
+		printf 'authorization was removed by an earlier failed entry, or a network change\n' >&2; \
+		printf '(office and home) left the gateway host-address pin stale. Recovery paths:\n' >&2; \
+		printf 'docs/guides/developer/carbonite-host-build.md, section "Revoke or repair".\n' >&2; \
+		exit "$$manager_status"; \
+	}; \
 fi
 endef
 
@@ -302,6 +310,11 @@ rebuild-distrobox: rm-distrobox image-distrobox enter-distrobox
 rebuild-carb: check-carb ## Remove the Carbonite sandbox, rebuild its image and enter
 	$(MAKE) rm-carb
 	$(MAKE) enter-carb
+
+# Repin the OpenShell gateway's host address after the host changed networks;
+# run on the host, then rebuild the sandbox so its supervisor picks it up.
+fix-carb-network: ## Repair the gateway host-address pin after a network change
+	@tools/carbonite/update-host-gateway-ip.sh
 
 status: status-$(DEV_CONTAINER_SUFFIX) ## Show the selected development-container status
 

@@ -153,6 +153,39 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
         manager.chmod(0o700)
         return manager
 
+    def write_host_shim(self, name, body):
+        shim = self.root / name
+        shim.write_text(
+            '#!/usr/bin/env python3\n'
+            'import json\n'
+            'import os\n'
+            'import sys\n'
+            'from pathlib import Path\n'
+            'with Path(os.environ["OSAC_CARB_LOG"]).open("a") as log:\n'
+            f'    log.write(json.dumps(["{name}", *sys.argv[1:]]) + "\\n")\n'
+            f'{body}\n')
+        shim.chmod(0o755)
+        return shim
+
+    def install_fix_carb_network(self, pinned="192.168.1.242"):
+        tools = self.checkout / "tools/carbonite"
+        tools.mkdir(parents=True)
+        shutil.copy(REPO_ROOT / "tools/carbonite/update-host-gateway-ip.sh",
+                    tools / "update-host-gateway-ip.sh")
+        self.write_host_shim(
+            "ip", 'print("1.1.1.1 via 10.0.0.1 dev eth0 src 192.168.4.5")')
+        self.write_host_shim("systemctl", 'print("active")')
+        config = self.home / ".config/openshell/gateway.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            '[openshell]\n'
+            'compute_driver = "podman"\n'
+            '\n'
+            '[openshell.drivers.podman]\n'
+            f'host_gateway_ip = "{pinned}"\n'
+            'health_check_interval_secs = 10\n')
+        return config
+
     def make(self, *args, succeeds=True, container_cmd=None, openshell_cmd=None, policy=None, **env):
         result = subprocess.run(
             [
@@ -535,6 +568,37 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
         self.assertEqual(sum(call[0] == "manager" for call in self.calls()), 1)
         self.assertEqual(self.interactive_execs(), [])
         self.assertIn("Error 44", result.stderr)
+
+    def test_manager_failure_points_at_the_troubleshooting_guide(self):
+        self.install_manager()
+        result = self.make("enter-carb", succeeds=False, OSAC_CARB_FAIL_MANAGER="1")
+        self.assertIn("network change", result.stderr)
+        self.assertIn("carbonite-host-build.md", result.stderr)
+
+    def test_fix_carb_network_repins_and_restarts_the_gateway(self):
+        config = self.install_fix_carb_network()
+
+        result = self.make("fix-carb-network")
+
+        updated = config.read_text()
+        self.assertIn(["ip", "-4", "route", "get", "1.1.1.1"], self.calls())
+        self.assertIn('host_gateway_ip = "192.168.4.5"', updated)
+        self.assertIn("compute_driver = ", updated)
+        self.assertIn("health_check_interval_secs = 10", updated)
+        self.assertIn(["systemctl", "--user", "restart", "openshell-gateway"], self.calls())
+        self.assertIn(["systemctl", "--user", "is-active", "openshell-gateway"], self.calls())
+        self.assertIn("rebuild-carb", result.stdout)
+        backup = config.with_name(config.name + ".before-host-gateway-ip")
+        self.assertIn('host_gateway_ip = "192.168.1.242"', backup.read_text())
+
+    def test_fix_carb_network_skips_restart_when_address_unchanged(self):
+        config = self.install_fix_carb_network(pinned="192.168.4.5")
+
+        result = self.make("fix-carb-network")
+
+        self.assertEqual([], [call for call in self.calls() if call[0] == "systemctl"])
+        self.assertIn('host_gateway_ip = "192.168.4.5"', config.read_text())
+        self.assertIn("already", result.stdout)
 
     def test_non_executable_or_symlinked_manager_fails_closed(self):
         manager = self.install_manager()

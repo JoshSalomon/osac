@@ -780,6 +780,64 @@ class ManagerTests(unittest.TestCase):
         self.assertNotIn(self.manager.MARKER, self.authorized.read_text())
         self.assertIn("removed the host-build key authorization", stderr.getvalue())
 
+    def test_prepare_timeout_failure_prints_network_change_hint(self):
+        paths = self.manager._paths(self.home)
+        paths["libexec"].mkdir(parents=True)
+        paths["config"].write_text("{}")
+        dispatcher = self.home / ".local/libexec/osac-host-build"
+        dispatcher.write_text("installed")
+        self.manager.install_authorized_key(self.authorized, "ssh-ed25519 AAAAfeature", dispatcher)
+
+        def fail_probe(argv, *, capture=False):
+            if argv[-1:] == ["probe"]:
+                raise subprocess.CalledProcessError(
+                    255, "probe",
+                    stderr="ssh: connect to host host.openshell.internal port 22: "
+                           "Connection timed out during banner exchange\n")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        stderr = io.StringIO()
+        with mock.patch.object(self.manager, "_bound", return_value={}), \
+             mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
+             mock.patch.object(self.manager, "_run", side_effect=fail_probe), \
+             mock.patch.object(self.manager.time, "sleep"), \
+             mock.patch.object(self.manager, "_cleanup_sandbox"), \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(ValueError):
+                self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        notice = stderr.getvalue()
+        self.assertIn("removed the host-build key authorization", notice)
+        self.assertIn("fix-carb-network", notice)
+        self.assertIn("rebuild-carb", notice)
+
+    def test_prepare_permission_failure_prints_no_network_hint(self):
+        paths = self.manager._paths(self.home)
+        paths["libexec"].mkdir(parents=True)
+        paths["config"].write_text("{}")
+        dispatcher = self.home / ".local/libexec/osac-host-build"
+        dispatcher.write_text("installed")
+        self.manager.install_authorized_key(self.authorized, "ssh-ed25519 AAAAfeature", dispatcher)
+
+        def fail_probe(argv, *, capture=False):
+            if argv[-1:] == ["probe"]:
+                raise subprocess.CalledProcessError(
+                    255, "probe",
+                    stderr="jsalomon@host.openshell.internal: Permission denied (publickey).\n")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        stderr = io.StringIO()
+        with mock.patch.object(self.manager, "_bound", return_value={}), \
+             mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
+             mock.patch.object(self.manager, "_run", side_effect=fail_probe), \
+             mock.patch.object(self.manager.time, "sleep"), \
+             mock.patch.object(self.manager, "_cleanup_sandbox"), \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(ValueError):
+                self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        notice = stderr.getvalue()
+        self.assertIn("removed the host-build key authorization", notice)
+        self.assertNotIn("fix-carb-network", notice)
+
     def test_prepare_probe_retries_unexpected_response(self):
         paths = self.manager._paths(self.home)
         paths["libexec"].mkdir(parents=True)

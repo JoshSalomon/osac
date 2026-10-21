@@ -31,6 +31,9 @@ EXEC_TIMEOUT_SECONDS = 30
 SSH_CONNECT_TIMEOUT_SECONDS = 5
 PROBE_ATTEMPTS = 3
 PROBE_RETRY_DELAY_SECONDS = 2
+# ssh reports an unreachable host as a timeout; other probe failures
+# (permission denied, unexpected response) have their own recovery paths.
+PROBE_TIMEOUT_PATTERN = re.compile(r"timed out|timeout", re.IGNORECASE)
 DOCS_URL = ("https://github.com/osac-project/osac/blob/main/docs/guides/"
             "developer/carbonite-host-build.md#revoke-or-repair")
 
@@ -541,6 +544,18 @@ def prepare(paths, gateway, workspace, sandbox, checkout):
                 # instead of leaving the user with an opaque denial.
                 print("prepare removed the host-build key authorization (entry fails closed); "
                       + _recovery_hint(paths, gateway, workspace, sandbox, checkout), file=sys.stderr)
+            if PROBE_TIMEOUT_PATTERN.search(str(original)):
+                # Timeouts that survive every retry are the signature of a
+                # host network change: the gateway still pins the address
+                # host.openshell.internal had when the sandbox was created,
+                # the supervisor dials an address the host no longer owns,
+                # and the host sshd never sees the connection.
+                print("probe timeouts that persist across retries are typical after the "
+                      "host changed networks (for example office and home): the OpenShell "
+                      "gateway still pins the host's previous address. Run "
+                      "'make fix-carb-network' from the checkout root, then the enable "
+                      "command above, then 'make rebuild-carb' - running sandboxes keep "
+                      "the old mapping", file=sys.stderr)
             if recovery_errors:
                 raise ValueError("prepare failed; " + "; ".join(recovery_errors)) from original
             raise

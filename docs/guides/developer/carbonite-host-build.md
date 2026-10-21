@@ -206,3 +206,43 @@ and only sign an attempt if the answer is yes, so a rejected build key never
 produces a `Failed publickey` line — the connection is logged only as closed
 during preauthentication. That is expected for this condition; it does not
 mean the client failed to offer the key.
+
+### Entry fails with `Connection timed out during banner exchange`
+
+`make enter-carb` (or `make claude-carb`) ending in
+
+```
+host-build prepare failed: host-build probe failed after 3 attempts:
+<user>@host.openshell.internal: Connection timed out during banner exchange
+Connection to 198.18.0.2 port 22 timed out
+```
+
+while the host `sshd` journal shows no connection attempts at all, is the
+typical symptom of a host network change — moving a laptop between office
+and home, docking, or switching to wifi. The local OpenShell gateway pins
+the host address that `host.openshell.internal` resolves to inside
+sandboxes. After a network change, every sandbox keeps dialing the address
+the host no longer owns: the connection is accepted by the sandbox network
+but never reaches the host sshd. When the probe fails this way, the manager
+prints this fix next to the authorization restore command. From the
+checkout root:
+
+```bash
+make fix-carb-network
+"$HOME/.local/libexec/osac-host-build-manager" enable \
+  --gateway openshell --workspace osac-kind --sandbox osac-carbonite-kind \
+  --checkout "$PWD"
+make rebuild-carb
+```
+
+`make fix-carb-network` (or `tools/carbonite/update-host-gateway-ip.sh`
+with an explicit address) repins `host_gateway_ip` to the host's current
+address and restarts the gateway; the enable command restores the
+authorization that the failed entry removed; `rebuild-carb` recreates the
+sandbox so its supervisor picks up the new mapping — the old sandbox keeps
+the stale one. Repeat `make fix-carb-network` after every later network
+change. Other sandboxes created before the change (for example the
+helm-verify or python-verify pairs) hold the same stale mapping until they
+are recreated. See
+[Carbonite/KiND integration](carbonite-kind-integration.md) for the gateway
+background.

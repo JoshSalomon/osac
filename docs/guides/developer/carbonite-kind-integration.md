@@ -39,59 +39,22 @@ kubeconfig into Carbonite.
    [root setup](../../../README.md#carbonite--openshell-linuxx86_64).
    On this Podman driver, the supervisor's `host.openshell.internal` mapping
    can select an address no longer assigned to a laptop after a network
-   change. Before creating the cluster-enabled sandbox, set
-   `host_gateway_ip` in that same `[openshell.drivers.podman]` section to the
-   host's current IPv4 address, then restart the gateway. The following
-   host-only command preserves the rest of the TOML and saves its first backup
-   beside it. It confines strict shell options to a subshell:
+   change. Before creating the cluster-enabled sandbox, pin
+   `host_gateway_ip` in that same `[openshell.drivers.podman]` section to
+   the host's current IPv4 address and restart the gateway with the
+   host-only helper:
 
    ```bash
-   (
-   set -euo pipefail
-   gateway_config="$HOME/.config/openshell/gateway.toml"
-   host_gateway_ip="$(ip -4 route get 1.1.1.1 | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i+1); exit } }')"
-   python3 - "$gateway_config" "$host_gateway_ip" <<'PY'
-   import ipaddress, os, re, shutil, stat, sys, tempfile, tomllib
-   from pathlib import Path
-
-   path = Path(sys.argv[1])
-   address = ipaddress.IPv4Address(sys.argv[2])
-   assert address.is_private and not address.is_loopback and not address.is_link_local
-   original = path.read_text()
-   lines = original.splitlines(keepends=True)
-   section = '[openshell.drivers.podman]'
-   starts = [i for i, line in enumerate(lines) if line.strip() == section]
-   assert len(starts) == 1
-   start = starts[0]
-   end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith('[')), len(lines))
-   keys = [i for i in range(start + 1, end) if re.match(r'\s*host_gateway_ip\s*=', lines[i])]
-   assert len(keys) <= 1
-   setting = f'host_gateway_ip = "{address}"\n'
-   if keys:
-       lines[keys[0]] = setting
-   else:
-       lines.insert(start + 1, setting)
-   updated = ''.join(lines)
-   tomllib.loads(updated)
-   backup = path.with_name(path.name + '.before-kind-relay')
-   if not backup.exists():
-       shutil.copy2(path, backup)
-   fd, next_path = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
-   try:
-       os.fchmod(fd, stat.S_IMODE(path.stat().st_mode))
-       with os.fdopen(fd, 'w') as out:
-           out.write(updated)
-           out.flush()
-           os.fsync(out.fileno())
-       os.replace(next_path, path)
-   finally:
-       if os.path.exists(next_path):
-           os.unlink(next_path)
-   PY
-   systemctl --user restart openshell-gateway
-   systemctl --user is-active openshell-gateway
-   )
+   make fix-carb-network
    ```
+
+   The helper (`tools/carbonite/update-host-gateway-ip.sh`) derives the
+   host's current default-route IPv4 address, updates only
+   `host_gateway_ip` while preserving the rest of the TOML, validates the
+   result, saves a first backup beside the config, and restarts the
+   gateway. It is a no-op when the pin already matches the current address.
+   To pin an explicit address instead of the derived one, run the script
+   directly with the address as its argument.
 
    This driver option controls the host alias injected into *new* supervisors.
    If the sandbox already exists, rebuild it after changing this setting. On
@@ -600,8 +563,7 @@ above. The ServiceAccount token is requested for 12 hours, but the cluster
 may grant a shorter lifetime. If it returns `EOF`, check the
 relay service and listener on the host, then verify that the supervisor's
 host alias still points to the current address. A network change requires
-updating `host_gateway_ip`, restarting the gateway, rebuilding the sandbox,
-and restarting the relay.
+`make fix-carb-network`, rebuilding the sandbox, and restarting the relay.
 
 ### Recover after laptop sleep or a network change
 
@@ -616,10 +578,10 @@ ss -lnt '( sport = :18443 )'
 
 If the host API is healthy but sandbox `kubectl` times out, the laptop may
 have a new address while the existing supervisor and relay still use the old
-one. Repeat the `host_gateway_ip` configuration block under **What the
-developer must prepare on the host**. It restarts the gateway. Then recreate
-the cluster-enabled sandbox from the host, using the same host-only policy and
-kubeconfig directory:
+one. Run `make fix-carb-network` (the `host_gateway_ip` helper under **What
+the developer must prepare on the host**). It restarts the gateway. Then
+recreate the cluster-enabled sandbox from the host, using the same host-only
+policy and kubeconfig directory:
 
 ```bash
 make rebuild-carb

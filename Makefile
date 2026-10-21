@@ -33,7 +33,7 @@ DEV_CONTAINER_SUFFIX := $(if $(filter true,$(USE_CARBONITE)),carb,distrobox)
 	image-distrobox enter-distrobox claude-distrobox stop-distrobox rm-distrobox \
 	rebuild-distrobox status-distrobox \
 	check-carb image-carb enter-carb claude-carb stop-carb rm-carb rebuild-carb status-carb \
-	fix-carb-network
+	fix enable fix-distrobox enable-distrobox fix-carb enable-carb
 
 define carbonite_require_commands
 @set -eu; \
@@ -96,8 +96,10 @@ if [ -e "$$manager" ]; then \
 		manager_status=$$?; \
 		printf 'Carbonite host-build preparation failed. Common causes: the host-build\n' >&2; \
 		printf 'authorization was removed by an earlier failed entry, or a network change\n' >&2; \
-		printf '(office and home) left the gateway host-address pin stale. Recovery paths:\n' >&2; \
-		printf 'docs/guides/developer/carbonite-host-build.md, section "Revoke or repair".\n' >&2; \
+		printf '(office and home) left the gateway host-address pin stale. Recovery:\n' >&2; \
+		printf '  make fix-carb && make enable-carb && make rebuild-carb\n' >&2; \
+		printf 'See docs/guides/developer/carbonite-host-build.md, section "Entry fails\n' >&2; \
+		printf 'with Connection timed out during banner exchange".\n' >&2; \
 		exit "$$manager_status"; \
 	}; \
 fi
@@ -311,10 +313,39 @@ rebuild-carb: check-carb ## Remove the Carbonite sandbox, rebuild its image and 
 	$(MAKE) rm-carb
 	$(MAKE) enter-carb
 
+fix: fix-$(DEV_CONTAINER_SUFFIX) ## Repair the selected container's host setup after a network change
+
+fix-distrobox:
+	@echo "Nothing to fix for Distrobox: no OpenShell gateway or host-address pin is involved."
+
 # Repin the OpenShell gateway's host address after the host changed networks;
 # run on the host, then rebuild the sandbox so its supervisor picks it up.
-fix-carb-network: ## Repair the gateway host-address pin after a network change
+fix-carb: ## Repair the OpenShell gateway host-address pin after a network change
 	@tools/carbonite/update-host-gateway-ip.sh
+
+enable: enable-$(DEV_CONTAINER_SUFFIX) ## Restore the host-build authorization after a failed entry
+
+enable-distrobox:
+	@echo "There is no enable target for Distrobox: the optional host-build channel is Carbonite-only."
+
+# Deliberate recovery for the fail-closed teardown: reinstalls the marked
+# host-build key authorization through the installed, binding-checked manager.
+enable-carb: ## Restore the host-build key authorization after a failed entry
+	@set -eu; \
+	manager="$$HOME/.local/libexec/osac-host-build-manager"; \
+	if [ -L "$$manager" ]; then \
+		printf 'Carbonite host-build manager must not be a symlink: %s\n' "$$manager" >&2; \
+		exit 1; \
+	fi; \
+	if [ ! -e "$$manager" ]; then \
+		printf 'Carbonite host-build manager not installed; host builds are optional.\n'; \
+	elif [ ! -f "$$manager" ] || [ ! -x "$$manager" ]; then \
+		printf 'Carbonite host-build manager is not an executable file: %s\n' "$$manager" >&2; \
+		exit 1; \
+	else \
+		"$$manager" enable --gateway "$(CARBONITE_GATEWAY)" --workspace "$(CARBONITE_WORKSPACE)" \
+			--sandbox "$(CARBONITE_NAME)" --checkout "$$(pwd -P)"; \
+	fi
 
 status: status-$(DEV_CONTAINER_SUFFIX) ## Show the selected development-container status
 

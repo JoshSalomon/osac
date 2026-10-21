@@ -807,8 +807,9 @@ class ManagerTests(unittest.TestCase):
                 self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
         notice = stderr.getvalue()
         self.assertIn("removed the host-build key authorization", notice)
-        self.assertIn("fix-carb-network", notice)
-        self.assertIn("rebuild-carb", notice)
+        self.assertIn("make fix-carb", notice)
+        self.assertIn("make enable-carb", notice)
+        self.assertIn("make rebuild-carb", notice)
 
     def test_prepare_permission_failure_prints_no_network_hint(self):
         paths = self.manager._paths(self.home)
@@ -872,6 +873,18 @@ class ManagerTests(unittest.TestCase):
                 self.assertEqual(1, self.manager.main(["status", "--checkout", str(self.checkout)]))
         self.assertIn("the host-build key authorization is missing", stderr.getvalue())
         self.assertIn("enable --gateway openshell", stderr.getvalue())
+
+    def test_enable_is_idempotent_when_already_authorized(self):
+        paths = self.manager._paths(self.home)
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+             mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
+             mock.patch.object(self.manager, "_host_key", return_value="osac-host-build ssh-ed25519 AAAAhost\n"), \
+             mock.patch.object(self.manager, "_run", side_effect=self._fake_keygen), \
+             contextlib.redirect_stderr(stderr):
+            self.manager.enable(paths, "openshell", "default", "osac-carbonite", self.checkout)
+            self.manager.enable(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        self.assertEqual(1, paths["authorized"].read_text().count(self.manager.MARKER))
 
 
 if __name__ == "__main__":

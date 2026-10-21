@@ -553,9 +553,9 @@ def prepare(paths, gateway, workspace, sandbox, checkout):
                 print("probe timeouts that persist across retries are typical after the "
                       "host changed networks (for example office and home): the OpenShell "
                       "gateway still pins the host's previous address. Run "
-                      "'make fix-carb-network' from the checkout root, then the enable "
-                      "command above, then 'make rebuild-carb' - running sandboxes keep "
-                      "the old mapping", file=sys.stderr)
+                      "'make fix-carb' from the checkout root, then 'make enable-carb', "
+                      "then 'make rebuild-carb' - running sandboxes keep the old mapping",
+                      file=sys.stderr)
             if recovery_errors:
                 raise ValueError("prepare failed; " + "; ".join(recovery_errors)) from original
             raise

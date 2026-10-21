@@ -167,7 +167,7 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
         shim.chmod(0o755)
         return shim
 
-    def install_fix_carb_network(self, pinned="192.168.1.242"):
+    def install_fix_carb(self, pinned="192.168.1.242"):
         tools = self.checkout / "tools/carbonite"
         tools.mkdir(parents=True)
         shutil.copy(REPO_ROOT / "tools/carbonite/update-host-gateway-ip.sh",
@@ -575,10 +575,10 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
         self.assertIn("network change", result.stderr)
         self.assertIn("carbonite-host-build.md", result.stderr)
 
-    def test_fix_carb_network_repins_and_restarts_the_gateway(self):
-        config = self.install_fix_carb_network()
+    def test_fix_carb_repins_and_restarts_the_gateway(self):
+        config = self.install_fix_carb()
 
-        result = self.make("fix-carb-network")
+        result = self.make("fix-carb")
 
         updated = config.read_text()
         self.assertIn(["ip", "-4", "route", "get", "1.1.1.1"], self.calls())
@@ -587,18 +587,65 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
         self.assertIn("health_check_interval_secs = 10", updated)
         self.assertIn(["systemctl", "--user", "restart", "openshell-gateway"], self.calls())
         self.assertIn(["systemctl", "--user", "is-active", "openshell-gateway"], self.calls())
-        self.assertIn("rebuild-carb", result.stdout)
+        self.assertIn("make enable-carb", result.stdout)
+        self.assertIn("make rebuild-carb", result.stdout)
         backup = config.with_name(config.name + ".before-host-gateway-ip")
         self.assertIn('host_gateway_ip = "192.168.1.242"', backup.read_text())
 
-    def test_fix_carb_network_skips_restart_when_address_unchanged(self):
-        config = self.install_fix_carb_network(pinned="192.168.4.5")
+    def test_fix_carb_skips_restart_when_address_unchanged(self):
+        config = self.install_fix_carb(pinned="192.168.4.5")
 
-        result = self.make("fix-carb-network")
+        result = self.make("fix-carb")
 
         self.assertEqual([], [call for call in self.calls() if call[0] == "systemctl"])
         self.assertIn('host_gateway_ip = "192.168.4.5"', config.read_text())
         self.assertIn("already", result.stdout)
+
+    def test_fix_and_enable_select_carbonite_when_use_carbonite_is_set(self):
+        config = self.install_fix_carb()
+        self.install_manager()
+
+        self.make("fix", "USE_CARBONITE=true")
+        self.make("enable", "USE_CARBONITE=true")
+
+        self.assertIn('host_gateway_ip = "192.168.4.5"', config.read_text())
+        self.assertIn(["manager", "enable", "--gateway", "openshell",
+                       "--workspace", "osac-kind", "--sandbox", "osac-carbonite-kind",
+                       "--checkout", str(self.checkout)], self.calls())
+
+    def test_fix_and_enable_are_informational_for_distrobox(self):
+        for target in ("fix", "enable"):
+            with self.subTest(target=target):
+                self.log.write_text("")
+                result = self.make(target)
+                self.assertIn("Distrobox", result.stdout)
+                self.assertEqual([], self.calls())
+
+    def test_enable_carb_runs_the_manager_with_the_bound_binding(self):
+        self.install_manager()
+        self.make("enable-carb", "CARBONITE_GATEWAY=local gateway",
+                  "CARBONITE_WORKSPACE=dev space")
+        self.assertIn(["manager", "enable", "--gateway", "local gateway",
+                       "--workspace", "dev space", "--sandbox", "osac-carbonite-kind",
+                       "--checkout", str(self.checkout)], self.calls())
+
+    def test_enable_carb_failure_fails_the_target(self):
+        self.install_manager()
+        self.make("enable-carb", succeeds=False, OSAC_CARB_FAIL_MANAGER="1")
+        self.assertEqual(1, sum(call[0] == "manager" for call in self.calls()))
+
+    def test_enable_carb_without_an_installed_manager_is_an_optional_noop(self):
+        result = self.make("enable-carb")
+        self.assertIn("host builds are optional", result.stdout)
+        self.assertEqual([], [call for call in self.calls() if call[0] == "manager"])
+
+    def test_enable_carb_rejects_unsafe_manager_files(self):
+        manager = self.install_manager()
+        manager.chmod(0o600)
+        self.make("enable-carb", succeeds=False)
+        manager.unlink()
+        manager.symlink_to(self.root / "engine")
+        self.make("enable-carb", succeeds=False)
 
     def test_non_executable_or_symlinked_manager_fails_closed(self):
         manager = self.install_manager()

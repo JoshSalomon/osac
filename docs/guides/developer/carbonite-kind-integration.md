@@ -45,7 +45,7 @@ kubeconfig into Carbonite.
    host-only helper:
 
    ```bash
-   make fix-carb-network
+   make fix-carb
    ```
 
    The helper (`tools/carbonite/update-host-gateway-ip.sh`) derives the
@@ -563,7 +563,7 @@ above. The ServiceAccount token is requested for 12 hours, but the cluster
 may grant a shorter lifetime. If it returns `EOF`, check the
 relay service and listener on the host, then verify that the supervisor's
 host alias still points to the current address. A network change requires
-`make fix-carb-network`, rebuilding the sandbox, and restarting the relay.
+`make fix-carb`, rebuilding the sandbox, and restarting the relay.
 
 ### Recover after laptop sleep or a network change
 
@@ -578,7 +578,7 @@ ss -lnt '( sport = :18443 )'
 
 If the host API is healthy but sandbox `kubectl` times out, the laptop may
 have a new address while the existing supervisor and relay still use the old
-one. Run `make fix-carb-network` (the `host_gateway_ip` helper under **What
+one. Run `make fix-carb` (the `host_gateway_ip` helper under **What
 the developer must prepare on the host**). It restarts the gateway. Then
 recreate the cluster-enabled sandbox from the host, using the same host-only
 policy and kubeconfig directory:

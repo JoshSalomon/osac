@@ -160,7 +160,9 @@ the fixed image recipe and host Podman output; the SSH grant does not make
 missing build dependencies or registry access available inside Carbonite.
 If entry fails partway through preparation, the manager removes the host key
 authorization first. After resolving the cause, use the **installed** manager
-with its original binding to restore authorization, then enter again:
+with its original binding to restore authorization — `make enable-carb` from
+the checkout root runs that command with the root Makefile's binding — then
+enter again:
 
 ```bash
 "$HOME/.local/libexec/osac-host-build-manager" enable \
@@ -189,8 +191,9 @@ failing `prepare`, and `make check-carb` through `manager status`, report
 this condition directly and print the exact restore command for the bound
 gateway, workspace, sandbox, and checkout.
 
-Restore the authorization with the **installed** manager using that printed
-command, then enter again. To inspect the state by hand:
+Restore the authorization with that printed command (or `make enable-carb`
+from the checkout root, which runs the installed manager with the root
+Makefile's binding), then enter again. To inspect the state by hand:
 
 ```bash
 ~/.local/libexec/osac-host-build-manager status \
@@ -228,19 +231,18 @@ prints this fix next to the authorization restore command. From the
 checkout root:
 
 ```bash
-make fix-carb-network
-"$HOME/.local/libexec/osac-host-build-manager" enable \
-  --gateway openshell --workspace osac-kind --sandbox osac-carbonite-kind \
-  --checkout "$PWD"
+make fix-carb
+make enable-carb
 make rebuild-carb
 ```
 
-`make fix-carb-network` (or `tools/carbonite/update-host-gateway-ip.sh`
-with an explicit address) repins `host_gateway_ip` to the host's current
-address and restarts the gateway; the enable command restores the
-authorization that the failed entry removed; `rebuild-carb` recreates the
-sandbox so its supervisor picks up the new mapping — the old sandbox keeps
-the stale one. Repeat `make fix-carb-network` after every later network
+All three steps are required. `make fix-carb` (or
+`tools/carbonite/update-host-gateway-ip.sh` with an explicit address)
+repins `host_gateway_ip` to the host's current address and restarts the
+gateway; `make enable-carb` restores the authorization that the failed
+entry removed through the installed manager; `make rebuild-carb` recreates
+the sandbox so its supervisor picks up the new mapping — the old sandbox
+keeps the stale one. Repeat `make fix-carb` after every later network
 change. Other sandboxes created before the change (for example the
 helm-verify or python-verify pairs) hold the same stale mapping until they
 are recreated. See

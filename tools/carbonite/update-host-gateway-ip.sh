@@ -13,9 +13,9 @@
 # This host-only helper repins host_gateway_ip to the current default-route
 # source address (or to ADDRESS when given), validates the result as TOML,
 # keeps a first-run backup beside the config, and restarts the gateway. The
-# pin is injected into NEW supervisors only: rebuild the sandbox afterwards
-# with 'make rebuild-carb', and re-run the enable command a failed entry
-# printed before rebuilding.
+# pin is injected into NEW supervisors only: restore the host-build
+# authorization a failed entry removed with 'make enable-carb', then rebuild
+# the sandbox with 'make rebuild-carb'.
 set -euo pipefail
 
 if [ -n "${OPENSHELL_SANDBOX:-}" ]; then
@@ -116,6 +116,6 @@ systemctl --user restart openshell-gateway
 systemctl --user is-active openshell-gateway
 
 echo "Pinned host_gateway_ip to $address in $config and restarted openshell-gateway."
-echo 'Next steps:'
-echo '  - Existing sandboxes keep the old mapping; rebuild with "make rebuild-carb".'
-echo '  - If a failed "make enter-carb" printed an enable command, re-run it first.'
+echo 'The gateway pin is updated, but entry is not fixed yet. Required next steps:'
+echo '  1. make enable-carb   # restores the host-build authorization a failed entry removed'
+echo '  2. make rebuild-carb  # recreates the sandbox so its supervisor uses the new address'

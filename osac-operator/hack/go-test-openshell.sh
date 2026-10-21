@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# controller-runtime v0.24.1 sends SIGTERM/SIGKILL to a process group when
-# envtest stops. OpenShell rejects negative-PID signals but permits signaling
-# an owned child by its positive PID. Patch only a temporary dependency copy
+# controller-runtime sends SIGTERM/SIGKILL to a process group when envtest
+# stops. OpenShell rejects negative-PID signals but permits signaling an
+# owned child by its positive PID. Patch only a temporary dependency copy
 # for this test run; never modify the module cache or the repository's go.mod.
+# The patched version is derived from go.mod so it cannot drift from the
+# module graph; the patched-line check below fails loudly when a controller-
+# runtime update changes the signal implementation.
 
-expected_version=v0.24.1
-GOWORK=off go mod download "sigs.k8s.io/controller-runtime@${expected_version}"
 version=$(GOWORK=off go list -m -f '{{.Version}}' sigs.k8s.io/controller-runtime)
-if [[ "$version" != "$expected_version" ]]; then
-	printf 'OpenShell envtest signal patch needs review for controller-runtime %s\n' "$version" >&2
-	exit 1
-fi
-
+GOWORK=off go mod download "sigs.k8s.io/controller-runtime@${version}"
 source_dir=$(GOWORK=off go list -m -f '{{.Dir}}' sigs.k8s.io/controller-runtime)
 patch_source="$source_dir/pkg/internal/testing/process/signal_unix.go"
 if [[ ! -f "$patch_source" ]]; then

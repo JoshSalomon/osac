@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 
 MARKER = "osac-carbonite-host-build"
@@ -28,6 +29,8 @@ SAFE_FORCED_PATH = re.compile(r"\A/[A-Za-z0-9_./-]+\Z")
 READY = "OSAC_HOST_BUILD_READY"
 EXEC_TIMEOUT_SECONDS = 30
 SSH_CONNECT_TIMEOUT_SECONDS = 5
+PROBE_ATTEMPTS = 3
+PROBE_RETRY_DELAY_SECONDS = 2
 DOCS_URL = ("https://github.com/osac-project/osac/blob/main/docs/guides/"
             "developer/carbonite-host-build.md#revoke-or-repair")
 
@@ -418,6 +421,37 @@ def _sandbox_exec_args(gateway, workspace, sandbox, *command):
     )
 
 
+def _probe(gateway, workspace, sandbox, ssh):
+    """Run one readiness probe; raise ValueError carrying the ssh failure detail."""
+    try:
+        result = _run(_sandbox_exec_args(gateway, workspace, sandbox, *ssh), capture=True)
+    except subprocess.CalledProcessError as error:
+        raise ValueError((error.stderr or error.stdout or "").strip()) from error
+    if result.stdout.strip() != READY:
+        raise ValueError("host-build probe returned an unexpected response")
+
+
+def _probe_with_retries(gateway, workspace, sandbox, ssh):
+    """Probe readiness, retrying transient failures before failing closed.
+
+    The probe runs right after the sandbox policy update; policy
+    re-convergence or host load can stall the first banner exchange for a
+    few seconds. Only a failure that persists across every attempt tears
+    the channel down.
+    """
+    for attempt in range(1, PROBE_ATTEMPTS + 1):
+        try:
+            _probe(gateway, workspace, sandbox, ssh)
+            return
+        except ValueError as error:
+            if attempt == PROBE_ATTEMPTS:
+                raise ValueError(
+                    f"host-build probe failed after {PROBE_ATTEMPTS} attempts: {error}") from error
+            print(f"host-build probe attempt {attempt}/{PROBE_ATTEMPTS} failed: {error}; "
+                  f"retrying in {PROBE_RETRY_DELAY_SECONDS}s", file=sys.stderr)
+            time.sleep(PROBE_RETRY_DELAY_SECONDS)
+
+
 def _sandbox_matches(gateway, workspace, sandbox):
     result = _run(_openshell_args(gateway, workspace, "sandbox", "get", sandbox, "--output", "json"), capture=True)
     item = json.loads(result.stdout)
@@ -488,13 +522,7 @@ def prepare(paths, gateway, workspace, sandbox, checkout):
                    "-o", "UserKnownHostsFile=/sandbox/.ssh/osac-host-build-known_hosts",
                    "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ClearAllForwardings=yes", "-T",
                    pwd.getpwuid(os.getuid()).pw_name + "@host.openshell.internal", "probe"]
-            try:
-                result = _run(_sandbox_exec_args(gateway, workspace, sandbox, *ssh), capture=True)
-            except subprocess.CalledProcessError as error:
-                detail = (error.stderr or error.stdout or "").strip()
-                raise ValueError("host-build probe failed: " + detail) from error
-            if result.stdout.strip() != READY:
-                raise ValueError("host-build probe returned an unexpected response")
+            _probe_with_retries(gateway, workspace, sandbox, ssh)
         except Exception as original:
             recovery_errors = []
             # Deny the host capability before attempting sandbox cleanup. A

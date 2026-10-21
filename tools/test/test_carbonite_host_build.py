@@ -627,6 +627,7 @@ class ManagerTests(unittest.TestCase):
         with mock.patch.object(self.manager, "_bound", return_value={}), \
              mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
              mock.patch.object(self.manager, "_run", side_effect=fail_probe), \
+             mock.patch.object(self.manager.time, "sleep"), \
              mock.patch.object(self.manager, "_cleanup_sandbox"):
             with self.assertRaises(ValueError) as raised:
                 self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
@@ -700,6 +701,7 @@ class ManagerTests(unittest.TestCase):
         with mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
              mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
              mock.patch.object(self.manager, "_run", side_effect=fail_probe), \
+             mock.patch.object(self.manager.time, "sleep"), \
              mock.patch.object(self.manager, "_cleanup_sandbox"):
             with contextlib.redirect_stderr(stderr):
                 with self.assertRaises(ValueError) as raised:
@@ -711,6 +713,93 @@ class ManagerTests(unittest.TestCase):
         self.assertIn(" ".join([str(paths["manager"]), "enable", "--gateway", "openshell",
                                 "--workspace", "default", "--sandbox", "osac-carbonite",
                                 "--checkout", str(self.checkout)]), notice)
+
+    def test_prepare_probe_retry_absorbs_transient_failure(self):
+        paths = self.manager._paths(self.home)
+        paths["libexec"].mkdir(parents=True)
+        paths["config"].write_text("{}")
+        dispatcher = self.home / ".local/libexec/osac-host-build"
+        dispatcher.write_text("installed")
+        self.manager.install_authorized_key(self.authorized, "ssh-ed25519 AAAAfeature", dispatcher)
+        attempts = []
+
+        def fail_once_then_ready(argv, *, capture=False):
+            if argv[-1:] == ["probe"]:
+                attempts.append(argv)
+                if len(attempts) == 1:
+                    raise subprocess.CalledProcessError(
+                        255, "probe",
+                        stderr="ssh: connect to host host.openshell.internal port 22: "
+                               "Connection timed out during banner exchange\n")
+                return subprocess.CompletedProcess(argv, 0, stdout="OSAC_HOST_BUILD_READY\n")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        stderr = io.StringIO()
+        sleeps = []
+        with mock.patch.object(self.manager, "_bound", return_value={}), \
+             mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
+             mock.patch.object(self.manager, "_run", side_effect=fail_once_then_ready), \
+             mock.patch.object(self.manager.time, "sleep", side_effect=sleeps.append), \
+             contextlib.redirect_stderr(stderr):
+            self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        self.assertEqual(2, len(attempts))
+        self.assertEqual([self.manager.PROBE_RETRY_DELAY_SECONDS], sleeps)
+        self.assertIn(self.manager.MARKER, self.authorized.read_text())
+        self.assertIn("retrying", stderr.getvalue())
+
+    def test_prepare_probe_fails_closed_after_all_attempts(self):
+        paths = self.manager._paths(self.home)
+        paths["libexec"].mkdir(parents=True)
+        paths["config"].write_text("{}")
+        dispatcher = self.home / ".local/libexec/osac-host-build"
+        dispatcher.write_text("installed")
+        self.manager.install_authorized_key(self.authorized, "ssh-ed25519 AAAAfeature", dispatcher)
+        attempts = []
+
+        def fail_probe(argv, *, capture=False):
+            if argv[-1:] == ["probe"]:
+                attempts.append(argv)
+                raise subprocess.CalledProcessError(
+                    255, "probe",
+                    stderr="ssh: connect to host host.openshell.internal port 22: "
+                           "Connection timed out during banner exchange\n")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        stderr = io.StringIO()
+        with mock.patch.object(self.manager, "_bound", return_value={}), \
+             mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
+             mock.patch.object(self.manager, "_run", side_effect=fail_probe), \
+             mock.patch.object(self.manager.time, "sleep"), \
+             mock.patch.object(self.manager, "_cleanup_sandbox"), \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(ValueError) as raised:
+                self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        self.assertEqual(self.manager.PROBE_ATTEMPTS, len(attempts))
+        self.assertIn(f"after {self.manager.PROBE_ATTEMPTS} attempts", str(raised.exception))
+        self.assertIn("banner exchange", str(raised.exception))
+        self.assertNotIn(self.manager.MARKER, self.authorized.read_text())
+        self.assertIn("removed the host-build key authorization", stderr.getvalue())
+
+    def test_prepare_probe_retries_unexpected_response(self):
+        paths = self.manager._paths(self.home)
+        paths["libexec"].mkdir(parents=True)
+        paths["config"].write_text("{}")
+        attempts = []
+
+        def wrong_then_ready(argv, *, capture=False):
+            if argv[-1:] == ["probe"]:
+                attempts.append(argv)
+                if len(attempts) == 1:
+                    return subprocess.CompletedProcess(argv, 0, stdout="unexpected\n")
+                return subprocess.CompletedProcess(argv, 0, stdout="OSAC_HOST_BUILD_READY\n")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        with mock.patch.object(self.manager, "_bound", return_value={}), \
+             mock.patch.object(self.manager, "_sandbox_matches", return_value="abc-123"), \
+             mock.patch.object(self.manager, "_run", side_effect=wrong_then_ready), \
+             mock.patch.object(self.manager.time, "sleep"):
+            self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        self.assertEqual(2, len(attempts))
 
     def test_status_surfaces_missing_authorization_recovery_command(self):
         paths = self.manager._paths(self.home)

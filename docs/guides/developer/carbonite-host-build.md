@@ -173,17 +173,20 @@ with its original binding to restore authorization, then enter again:
 `make enter-carb` (or `make claude-carb`) ending in
 
 ```
-host-build prepare failed: host-build probe failed: <user>@host.openshell.internal:
+host-build prepare failed: host-build probe failed after 3 attempts:
+<user>@host.openshell.internal:
 Permission denied (publickey,gssapi-keyex,gssapi-with-mic,password).
 ```
 
 almost always means the marked host-build key is no longer in the host
-account's `~/.ssh/authorized_keys`. Any failed preparation removes it on
-purpose (entry fails closed), so one transient failure — for example, the
-OpenShell policy rule not yet enforced when the probe connects — leaves every
-later entry rejected until the authorization is restored. The failing
-`prepare`, and `make check-carb` through `manager status`, report this
-condition directly and print the exact restore command for the bound
+account's `~/.ssh/authorized_keys`. A failed preparation removes it on
+purpose (entry fails closed). The readiness probe retries transient
+failures — for example, the OpenShell policy rule not yet enforced when
+the probe connects, or a banner exchange stalled by host load — so only a
+failure that persists across every attempt tears the authorization down;
+after that, every later entry is rejected until it is restored. The
+failing `prepare`, and `make check-carb` through `manager status`, report
+this condition directly and print the exact restore command for the bound
 gateway, workspace, sandbox, and checkout.
 
 Restore the authorization with the **installed** manager using that printed

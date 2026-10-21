@@ -399,8 +399,9 @@ to select another local gateway.
 
 The policy defaults to `tools/carbonite/policy.yaml`, adapted from Carbonite
 for the OpenShell 0.1 policy schema. Its deployment-internal endpoints are
-reserved `.example` placeholders; substitute them for internal deployments
-and keep the substituted policy outside the repository. The
+reserved `.example` placeholders; set `CARBONITE_GITLAB_HOST`,
+`CARBONITE_JIRA_HOST` and `CARBONITE_PATTERNS_HOST` to substitute them at
+sandbox creation, and keep the substituted policy outside the repository. The
 [KiND integration guide](docs/guides/developer/carbonite-kind-integration.md)
 shows the substitution step. Set `CARBONITE_POLICY` for another
 project policy. Use that policy to allow the project's dependencies and cluster

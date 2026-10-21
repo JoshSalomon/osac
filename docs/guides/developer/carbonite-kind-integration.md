@@ -431,8 +431,25 @@ PY
 
 The copied policy keeps deployment-internal endpoints as reserved `.example`
 placeholder hosts (the `gitlab`, `jira`, and `rh_pattern_server` rules).
-Substitute them with the deployment's real endpoints — or remove rules you
-do not need — before creating the sandbox:
+Export the deployment's real hostnames before creating the sandbox, for
+example from your shell profile:
+
+```bash
+export CARBONITE_GITLAB_HOST=<internal-gitlab-host>
+export CARBONITE_JIRA_HOST=<jira-host>
+export CARBONITE_PATTERNS_HOST=<internal-pattern-server-host>
+```
+
+When any of these is set, sandbox creation runs
+`tools/carbonite/render-policy.sh`, which writes a substituted copy to
+`$STATE_DIR/policy-rendered.yaml` (mode 0600, outside the checkout) and
+passes that file to OpenShell. The copy at `$STATE_DIR/policy-kind.yaml` is
+never modified, and an unset variable leaves its placeholder and rule inert.
+Values must be plain hostnames. A policy change applies only to new sandboxes,
+so run `make rebuild-carb` after changing a variable.
+
+If you prefer to edit the copied policy directly, replace the placeholders
+with `sed` instead and leave the variables unset:
 
 ```bash
 sed -i \
@@ -442,8 +459,8 @@ sed -i \
   "$STATE_DIR/policy-kind.yaml"
 ```
 
-Keep the substituted policy outside the repository and never commit it: it
-contains the deployment's internal endpoints.
+Keep both policy files outside the repository and never commit them: they
+contain the deployment's internal endpoints.
 
 Review `$STATE_DIR/policy-kind.yaml` before creating the sandbox. The `tls:
 skip` policy setting delegates certificate verification to `kubectl` and its

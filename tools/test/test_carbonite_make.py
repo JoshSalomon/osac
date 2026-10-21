@@ -738,5 +738,38 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
         self.make("claude-carb", *options, succeeds=False, OSAC_CARB_EXEC_EXIT="23")
 
 
+    def install_render_policy(self):
+        tools = self.checkout / "tools/carbonite"
+        tools.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / "tools/carbonite/render-policy.sh",
+                    tools / "render-policy.sh")
+        self.policy.write_text("- host: jira.internal.example\n")
+
+    def test_create_renders_internal_hosts_from_the_environment(self):
+        self.install_render_policy()
+        self.make("enter-carb", CARBONITE_JIRA_HOST="jira.corp.test")
+
+        create = next(call for call in self.calls() if call[0] == "openshell" and call[6] == "create")
+        rendered = self.state_dir / "policy-rendered.yaml"
+        self.assertEqual(create[create.index("--policy") + 1], str(rendered))
+        self.assertEqual(rendered.read_text(), "- host: jira.corp.test\n")
+        self.assertEqual(self.policy.read_text(), "- host: jira.internal.example\n")
+
+    def test_create_uses_the_policy_unchanged_without_host_variables(self):
+        self.install_render_policy()
+        self.make("enter-carb")
+
+        create = next(call for call in self.calls() if call[0] == "openshell" and call[6] == "create")
+        self.assertEqual(create[create.index("--policy") + 1], str(self.policy))
+        self.assertFalse((self.state_dir / "policy-rendered.yaml").exists())
+
+    def test_create_fails_before_the_sandbox_on_an_invalid_host(self):
+        self.install_render_policy()
+        result = self.make("enter-carb", succeeds=False, CARBONITE_JIRA_HOST="bad host")
+
+        self.assertIn("CARBONITE_JIRA_HOST", result.stderr)
+        self.assertNotIn("create", self.operations())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -149,6 +149,11 @@ case "$$phase" in \
 			printf 'Carbonite policy not found: %s\nSet CARBONITE_POLICY to the project policy.\n' "$(CARBONITE_POLICY)" >&2; \
 			exit 1; \
 		fi; \
+		policy_file="$(CARBONITE_POLICY)"; \
+		if [ -n "$${CARBONITE_GITLAB_HOST:-}$${CARBONITE_JIRA_HOST:-}$${CARBONITE_PATTERNS_HOST:-}" ]; then \
+			policy_file="$(CARBONITE_STATE_DIR)/policy-rendered.yaml"; \
+			"$(CURDIR)/$(CARBONITE_CONTEXT)/render-policy.sh" "$(CARBONITE_POLICY)" "$$policy_file"; \
+		fi; \
 		kube_dir="$${CARBONITE_KUBECONFIG_DIR:-}"; \
 		if [ -n "$$kube_dir" ]; then \
 			case "$$kube_dir" in /*) ;; *) printf 'CARBONITE_KUBECONFIG_DIR must be an absolute path.\n' >&2; exit 1 ;; esac; \
@@ -205,7 +210,7 @@ case "$$phase" in \
 				(if $$kube_dir == "" then [] else [{type: "volume", source: $$kube_volume, target: "/sandbox/kube", read_only: true}] end))}}')"; \
 		if [ -n "$$kube_dir" ]; then set -- --env 'KUBECONFIG=/sandbox/kube/config'; else set --; fi; \
 		$(CARBONITE_RUN) sandbox create --name "$(CARBONITE_NAME)" \
-			--from "$(CARBONITE_IMAGE_REF)" --policy "$(CARBONITE_POLICY)" \
+			--from "$(CARBONITE_IMAGE_REF)" --policy "$$policy_file" \
 			--driver-config-json "$$mount_config" --env "PROJECT_DIR=$(CARBONITE_WORKDIR)" "$$@" \
 			$(CARBONITE_CREATE_ARGS) --no-tty --detach --output json -- sleep infinity ;; \
 	*) printf 'Sandbox %s is %s; inspect it with make status-carb.\n' "$(CARBONITE_NAME)" "$$phase" >&2; exit 1 ;; \

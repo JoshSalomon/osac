@@ -408,7 +408,10 @@ project policy. Use that policy to allow the project's dependencies and cluster
 API. `CARBONITE_CREATE_ARGS` accepts additional OpenShell creation options,
 including an approved provider, for example
 `CARBONITE_CREATE_ARGS='--provider my-claude-provider'`. Authenticate Claude in
-the sandbox or attach a provider before using it. The targets use the tools
+the sandbox or attach a provider before using it. GitHub and Jira credentials
+use OpenShell providers, set up once and attached to every new sandbox with
+`CARBONITE_PROVIDERS`; see the
+[credentials guide](docs/guides/developer/carbonite-credentials.md). The targets use the tools
 installed in the image; Carbonite's host-side credential import and plugin setup
 are separate launcher features.
 

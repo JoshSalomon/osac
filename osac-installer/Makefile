@@ -232,6 +232,16 @@ $(error NS must be a valid Kubernetes namespace name)
 endif
 endif
 
+# PROFILE is expanded into shell recipes through KIND_RUNTIME_ENV, so accept
+# only the supported profiles even for targets outside the install set.
+ifneq ($(strip $(PROFILE)),)
+export PROFILE
+PROFILE_VALID := $(shell printf '%s' "$$PROFILE" | grep -Eqx 'dev|dev-full|vmaas-ci|bmaas-ci|bmaas-netbox-ci|caas-ci|full-ci|cudn-evpn-netris-test' && [ "$$(printf '%s' "$$PROFILE" | wc -l)" -eq 0 ] && echo yes || echo no)
+ifneq ($(PROFILE_VALID),yes)
+$(error PROFILE is not a supported profile)
+endif
+endif
+
 # Container tool and Kind cluster config.
 CONTAINER_TOOL ?= $(or $(shell command -v podman 2>/dev/null),$(shell command -v docker 2>/dev/null),$(error neither podman nor docker found in PATH))
 # CONTAINER_TOOL is interpolated into shell recipes and passed to child makes,
@@ -270,6 +280,13 @@ KIND_RUNTIME_ENV := KIND_PROFILE=$(PROFILE) \
 	$(if $(KIND_RUNTIME_PROVIDER),KIND_EXPERIMENTAL_PROVIDER=$(KIND_RUNTIME_PROVIDER))
 KIND_RUNTIME_CMD := $(KIND_RUNTIME_ENV) $(KIND_RUNTIME)
 KIND_CLUSTER_NAME ?= osac-dev
+# The cluster name becomes a container name and appears unquoted in kind
+# commands, so accept only a plain name.
+export KIND_CLUSTER_NAME
+KIND_CLUSTER_NAME_VALID := $(shell printf '%s' "$$KIND_CLUSTER_NAME" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9_.-]*' && [ "$$(printf '%s' "$$KIND_CLUSTER_NAME" | wc -l)" -eq 0 ] && [ $${#KIND_CLUSTER_NAME} -le 63 ] && echo yes || echo no)
+ifneq ($(KIND_CLUSTER_NAME_VALID),yes)
+$(error KIND_CLUSTER_NAME must be a plain cluster name, using only letters, digits, dot, dash or underscore)
+endif
 KIND_CONFIG := kind-config.yaml
 ifeq ($(PROFILE),dev-full)
 KIND_CONFIG := kind-config-dev-full.yaml

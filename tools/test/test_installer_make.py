@@ -127,6 +127,42 @@ class InstallerMakeTest(unittest.TestCase):
             self.assertIn("NS", result.stderr)
             self.assertFalse(marker.exists())
 
+    def test_standalone_targets_validate_the_profile(self):
+        """A target outside the install set still rejects a hostile PROFILE."""
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "pwned"
+            result = self.make(
+                "local-operator-image", f"PROFILE=x; touch {marker} #"
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("PROFILE", result.stderr)
+            self.assertFalse(marker.exists())
+
+    def test_rejects_shell_syntax_in_the_cluster_name(self):
+        """The kind cluster name reaches shell recipes; reject shell syntax."""
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "pwned"
+            for name in (f"x; touch {marker} #", "x y", "x/y"):
+                with self.subTest(name=name):
+                    result = self.make(
+                        "install-infra", *BASE_ARGS, KIND_CLUSTER_NAME=name
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("KIND_CLUSTER_NAME", result.stderr)
+                    self.assertFalse(marker.exists())
+
+    def test_accepts_a_plain_cluster_name_and_profile(self):
+        """The default-looking cluster name and a known profile pass."""
+        result = self.make(
+            "install-infra", *BASE_ARGS, KIND_CLUSTER_NAME="osac-dev"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.make(
+            "local-operator-image", "PROFILE=dev-full", "NS=osac",
+            "PLATFORM=kind",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     # -- Local operator image -------------------------------------------
 
     def test_tag_is_passed_to_helm_as_a_string(self):

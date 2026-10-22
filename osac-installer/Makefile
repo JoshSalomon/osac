@@ -86,6 +86,13 @@ endif
 ifndef NS
 $(error NS is required (namespace for OSAC instance, e.g. NS=osac))
 endif
+# NS reaches shell text through KIND_RUNTIME_ENV and helm arguments, so accept
+# only a valid Kubernetes namespace name.
+export NS
+NS_VALID := $(shell [ -n "$$NS" ] && printf '%s' "$$NS" | grep -Eqx '[a-z0-9]([a-z0-9-]*[a-z0-9])?' && [ $${#NS} -le 63 ] && echo yes || echo no)
+ifneq ($(NS_VALID),yes)
+$(error NS must be a valid Kubernetes namespace name)
+endif
 ifeq ($(PLATFORM),kind)
 ifeq ($(filter $(PROFILE),dev dev-full),)
 $(error PLATFORM=kind only supports PROFILE=dev or PROFILE=dev-full)
@@ -215,6 +222,15 @@ endif
 
 # Container tool and Kind cluster config.
 CONTAINER_TOOL ?= $(or $(shell command -v podman 2>/dev/null),$(shell command -v docker 2>/dev/null),$(error neither podman nor docker found in PATH))
+# CONTAINER_TOOL is interpolated into shell recipes and passed to child makes,
+# so accept only a bare executable name or an absolute path to one. The value
+# reaches the shell through the environment; it is never spliced into shell
+# text.
+export CONTAINER_TOOL
+CONTAINER_TOOL_VALID := $(shell [ -n "$$CONTAINER_TOOL" ] && printf '%s' "$$CONTAINER_TOOL" | grep -Eqx '[A-Za-z0-9_-]+|/[A-Za-z0-9_./-]+' && [ "$$(printf '%s' "$$CONTAINER_TOOL" | wc -l)" -eq 0 ] && echo yes || echo no)
+ifneq ($(CONTAINER_TOOL_VALID),yes)
+$(error CONTAINER_TOOL must be an executable name or an absolute path, using only letters, digits, dot, dash, underscore or slash)
+endif
 # kind defaults to the Docker provider. On Apple Silicon, honor an explicitly
 # selected container tool when the Kind provider has not been set separately;
 # this keeps an existing Docker- or Podman-backed cluster on the same runtime

@@ -25,12 +25,17 @@ class OperatorIntegrationPreflightTest(unittest.TestCase):
             'case "$*" in\n'
             '  *--raw=/readyz*) [ "${FAKE_API_DOWN:-}" != 1 ] ;;\n'
             '  *"get pods"*) [ "${FAKE_PODS_DOWN:-}" != 1 ] || exit 1; '
-            '[ "${FAKE_OPERATOR_PRESENT:-}" != 1 ] || echo pod/operator ;;\n'
+            'count=$(( $(cat "$KUBECTL_PODS" 2>/dev/null || echo 0) + 1 )); '
+            'printf "%s" "$count" > "$KUBECTL_PODS"; '
+            'if [ -n "${FAKE_PODS_AFTER:-}" ]; then '
+            '[ "$count" -lt "$FAKE_PODS_AFTER" ] || echo pod/operator; '
+            'elif [ "${FAKE_OPERATOR_PRESENT:-}" = 1 ]; then echo pod/operator; fi; true ;;\n'
             '  *) exit 3 ;;\n'
             'esac\n'
         )
         kubectl.chmod(0o755)
         self.calls = self.root / "calls"
+        self.pods = self.root / "pods"
         self.config = self.root / "config"
         self.config.write_text("apiVersion: v1\nkind: Config\n")
 
@@ -41,6 +46,8 @@ class OperatorIntegrationPreflightTest(unittest.TestCase):
             "OPENSHELL_SANDBOX": "",
             "KUBECONFIG": str(self.config),
             "KUBECTL_CALLS": str(self.calls),
+            "KUBECTL_PODS": str(self.pods),
+            "OPERATOR_PREFLIGHT_INTERVAL": "0",
             "FAKE_OPERATOR_PRESENT": "1",
             **overrides,
         }
@@ -60,7 +67,7 @@ class OperatorIntegrationPreflightTest(unittest.TestCase):
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
 
     def test_missing_operator_fails_without_five_minute_poll(self):
-        result = self.run_preflight(FAKE_OPERATOR_PRESENT="0")
+        result = self.run_preflight(FAKE_OPERATOR_PRESENT="0", OPERATOR_PREFLIGHT_TIMEOUT="0")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("operator", result.stderr)
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
@@ -69,6 +76,51 @@ class OperatorIntegrationPreflightTest(unittest.TestCase):
         result = self.run_preflight()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
+
+
+    def pods_calls(self):
+        if not self.calls.exists():
+            return 0
+        return len([
+            line for line in self.calls.read_text().splitlines()
+            if "-o name" in line
+        ])
+
+    def test_absent_operator_waits_within_the_configured_window(self):
+        result = self.run_preflight(
+            FAKE_OPERATOR_PRESENT="0", FAKE_PODS_AFTER="3",
+            OPERATOR_PREFLIGHT_TIMEOUT="30",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Waiting up to 30s", result.stdout)
+        self.assertEqual(self.pods_calls(), 3)
+
+    def test_absent_operator_fails_when_the_window_expires(self):
+        result = self.run_preflight(
+            FAKE_OPERATOR_PRESENT="0",
+            OPERATOR_PREFLIGHT_TIMEOUT="1", OPERATOR_PREFLIGHT_INTERVAL="1",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("after 1s", result.stderr)
+        self.assertGreaterEqual(self.pods_calls(), 2)
+
+    def test_access_failure_is_not_retried(self):
+        result = self.run_preflight(FAKE_PODS_DOWN="1", OPERATOR_PREFLIGHT_TIMEOUT="30")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cannot list operator pods", result.stderr)
+        self.assertNotIn("Waiting up to", result.stdout)
+        self.assertEqual(self.pods_calls(), 1)
+
+    def test_invalid_window_is_rejected_before_kubectl(self):
+        for variable in ("OPERATOR_PREFLIGHT_TIMEOUT", "OPERATOR_PREFLIGHT_INTERVAL"):
+            with self.subTest(variable=variable):
+                result = self.run_preflight(**{variable: "5m"})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(variable, result.stderr)
+                self.assertFalse(self.calls.exists())
+
+    def test_default_window_matches_the_suite_five_minute_tolerance(self):
+        self.assertIn("OPERATOR_PREFLIGHT_TIMEOUT:-300", SCRIPT.read_text())
 
 
 if __name__ == "__main__":

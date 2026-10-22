@@ -17,6 +17,13 @@ CARBONITE_WORKSPACE ?= osac-kind
 CARBONITE_CREATE_ARGS ?=
 CARBONITE_KUBECONFIG_DIR ?= $(CARBONITE_STATE_DIR)/kube
 export CARBONITE_KUBECONFIG_DIR
+# Space-separated OpenShell provider names attached to every created sandbox.
+CARBONITE_PROVIDERS ?=
+export CARBONITE_PROVIDERS
+# Host jira-cli config copied into each created sandbox; it holds no credential
+# (the token arrives through the jira provider).
+CARBONITE_JIRA_CONFIG ?= $(if $(JIRA_CONFIG_FILE),$(JIRA_CONFIG_FILE),$(HOME)/.config/.jira/.config.yml)
+export CARBONITE_JIRA_CONFIG
 # Local images need a tag; OpenShell 0.1 no longer resolves community aliases.
 CARBONITE_IMAGE_REF := $(if $(findstring :,$(CARBONITE_IMAGE_NAME)),$(CARBONITE_IMAGE_NAME),$(CARBONITE_IMAGE_NAME):latest)
 CARBONITE_RUN = $(OPENSHELL_CMD) --gateway "$(CARBONITE_GATEWAY)" --workspace "$(CARBONITE_WORKSPACE)"
@@ -154,6 +161,27 @@ case "$$phase" in \
 			policy_file="$(CARBONITE_STATE_DIR)/policy-rendered.yaml"; \
 			"$(CURDIR)/$(CARBONITE_CONTEXT)/render-policy.sh" "$(CARBONITE_POLICY)" "$$policy_file"; \
 		fi; \
+		providers=""; \
+		set -f; \
+		for provider in $${CARBONITE_PROVIDERS:-}; do \
+			case "$$provider" in \
+				-*|*[!A-Za-z0-9._-]*) \
+					printf 'CARBONITE_PROVIDERS entries must be plain provider names, got: %s\n' "$$provider" >&2; exit 1 ;; \
+			esac; \
+			providers="$$providers $$provider"; \
+		done; \
+		set +f; \
+		jira_config="$${CARBONITE_JIRA_CONFIG:-}"; \
+		if [ -n "$$jira_config" ] && [ -e "$$jira_config" ]; then \
+			if [ ! -f "$$jira_config" ]; then \
+				printf 'The jira config must be a regular file: %s\n' "$$jira_config" >&2; exit 1; \
+			fi; \
+			if grep -qiE 'ATATT|openshell:resolve|^[[:space:]]*(api_?token|password|token|secret)[A-Za-z_]*:' "$$jira_config"; then \
+				printf 'Refusing to copy %s into the sandbox: it looks like it contains a credential.\n' "$$jira_config" >&2; exit 1; \
+			fi; \
+		else \
+			jira_config=""; \
+		fi; \
 		kube_dir="$${CARBONITE_KUBECONFIG_DIR:-}"; \
 		if [ -n "$$kube_dir" ]; then \
 			case "$$kube_dir" in /*) ;; *) printf 'CARBONITE_KUBECONFIG_DIR must be an absolute path.\n' >&2; exit 1 ;; esac; \
@@ -209,10 +237,24 @@ case "$$phase" in \
 			'{podman: {mounts: ([{type: "volume", source: $$source, target: $$target, read_only: false}] + \
 				(if $$kube_dir == "" then [] else [{type: "volume", source: $$kube_volume, target: "/sandbox/kube", read_only: true}] end))}}')"; \
 		if [ -n "$$kube_dir" ]; then set -- --env 'KUBECONFIG=/sandbox/kube/config'; else set --; fi; \
+		for provider in $$providers; do set -- "$$@" --provider "$$provider"; done; \
 		$(CARBONITE_RUN) sandbox create --name "$(CARBONITE_NAME)" \
 			--from "$(CARBONITE_IMAGE_REF)" --policy "$$policy_file" \
 			--driver-config-json "$$mount_config" --env "PROJECT_DIR=$(CARBONITE_WORKDIR)" "$$@" \
-			$(CARBONITE_CREATE_ARGS) --no-tty --detach --output json -- sleep infinity ;; \
+			$(CARBONITE_CREATE_ARGS) --no-tty --detach --output json -- sleep infinity; \
+		if [ -n "$$jira_config" ]; then \
+			for attempt in $$(seq 1 60); do \
+				$(carbonite_state) \
+				[ "$$phase" != Ready ] || break; \
+				sleep 1; \
+			done; \
+			if [ "$$phase" = Ready ] && $(CARBONITE_RUN) sandbox upload "$(CARBONITE_NAME)" "$$jira_config" \
+				/sandbox/.config/.jira/.config.yml --no-git-ignore; then \
+				printf 'Copied the host jira config into the sandbox.\n'; \
+			else \
+				printf 'Warning: could not copy the jira config into the sandbox; run jira init there.\n' >&2; \
+			fi; \
+		fi ;; \
 	*) printf 'Sandbox %s is %s; inspect it with make status-carb.\n' "$(CARBONITE_NAME)" "$$phase" >&2; exit 1 ;; \
 esac
 endef

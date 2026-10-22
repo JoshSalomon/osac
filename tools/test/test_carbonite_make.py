@@ -78,6 +78,12 @@ elif command == "create":
     assert option("--output") == "json", "Creation must detach after provisioning"
     assert "--detach" in options, "A trailing command with JSON output must detach"
     state[name] = "Ready"
+elif command == "upload":
+    assert options[0] in state
+    assert state[options[0]] == "Ready", "Upload before readiness"
+    if os.environ.get("OSAC_CARB_FAIL_UPLOAD"):
+        print("upload failed", file=sys.stderr)
+        sys.exit(1)
 elif command in ("start", "stop", "delete"):
     name = options[0]
     assert name in state
@@ -769,6 +775,106 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
 
         self.assertIn("CARBONITE_JIRA_HOST", result.stderr)
         self.assertNotIn("create", self.operations())
+
+
+    def test_create_attaches_each_listed_provider(self):
+        self.make("enter-carb", CARBONITE_PROVIDERS="osac-github osac-jira")
+
+        create = next(call for call in self.calls() if call[0] == "openshell" and call[6] == "create")
+        providers = [create[i + 1] for i, arg in enumerate(create) if arg == "--provider"]
+        self.assertEqual(providers, ["osac-github", "osac-jira"])
+        self.assertIn("KUBECONFIG=/sandbox/kube/config", create)
+
+    def test_create_attaches_no_provider_by_default(self):
+        self.make("enter-carb")
+
+        create = next(call for call in self.calls() if call[0] == "openshell" and call[6] == "create")
+        self.assertNotIn("--provider", create)
+
+    def test_create_rejects_provider_names_that_are_not_plain(self):
+        for value in ("a;b", "a$b", "-x", "a/b", "a'b"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                result = self.make("enter-carb", succeeds=False, CARBONITE_PROVIDERS=value)
+                self.assertIn("CARBONITE_PROVIDERS", result.stderr)
+                self.assertNotIn("create", self.operations())
+
+
+    def write_host_jira_config(self, text="server: https://jira.corp.test\nlogin: dev@corp.test\n"):
+        config = self.home / ".config/.jira/.config.yml"
+        config.parent.mkdir(parents=True)
+        config.write_text(text)
+        return config
+
+    def uploads(self):
+        return [call for call in self.calls() if call[0] == "openshell" and call[6] == "upload"]
+
+    def test_create_uploads_the_host_jira_config(self):
+        config = self.write_host_jira_config()
+        self.make("enter-carb")
+
+        self.assertEqual(self.uploads(), [[
+            "openshell", "--gateway", "openshell", "--workspace", "osac-kind",
+            "sandbox", "upload", "osac-carbonite-kind", str(config),
+            "/sandbox/.config/.jira/.config.yml", "--no-git-ignore",
+        ]])
+        operations = self.operations()
+        self.assertLess(operations.index("create"), operations.index("upload"))
+
+    def test_jira_config_location_follows_jira_config_file_then_override(self):
+        default = self.write_host_jira_config()
+        custom = self.root / "custom-jira.yml"
+        custom.write_text("server: https://jira.corp.test\n")
+        self.make("enter-carb", JIRA_CONFIG_FILE=str(custom))
+        self.assertEqual(self.uploads()[0][8], str(custom))
+
+        self.state.write_text("{}")
+        self.log.write_text("")
+        override = self.root / "override-jira.yml"
+        override.write_text("server: https://jira.corp.test\n")
+        self.make("enter-carb", JIRA_CONFIG_FILE=str(custom), CARBONITE_JIRA_CONFIG=str(override))
+        self.assertEqual(self.uploads()[0][8], str(override))
+        self.assertTrue(default.exists())
+
+    def test_create_without_a_host_jira_config_uploads_nothing(self):
+        self.make("enter-carb")
+        self.assertEqual(self.uploads(), [])
+
+    def test_reentry_does_not_upload_the_jira_config_again(self):
+        self.write_host_jira_config()
+        self.make("enter-carb")
+        self.make("enter-carb")
+        self.assertEqual(len(self.uploads()), 1)
+
+    def test_jira_config_with_a_credential_is_refused_before_create(self):
+        for text in (
+            "server: x\napi_token: abc\n",
+            "server: x\n  password: abc\n",
+            "server: x\nlogin: a\nnote: ATATT3xFfGF0abcdef\n",
+            "server: x\nnote: openshell:resolve:env:v1_JIRA_API_TOKEN\n",
+        ):
+            with self.subTest(text=text):
+                self.log.write_text("")
+                config = self.home / ".config/.jira/.config.yml"
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.write_text(text)
+                result = self.make("enter-carb", succeeds=False)
+                self.assertIn(str(config), result.stderr)
+                self.assertIn("credential", result.stderr)
+                self.assertNotIn("create", self.operations())
+
+    def test_jira_config_that_is_not_a_regular_file_is_refused(self):
+        config = self.home / ".config/.jira/.config.yml"
+        config.mkdir(parents=True)
+        result = self.make("enter-carb", succeeds=False)
+        self.assertIn("regular file", result.stderr)
+        self.assertNotIn("create", self.operations())
+
+    def test_failed_jira_config_upload_warns_but_keeps_the_sandbox(self):
+        self.write_host_jira_config()
+        result = self.make("enter-carb", OSAC_CARB_FAIL_UPLOAD="1")
+        self.assertIn("jira config", result.stderr)
+        self.assertEqual(self.operations().count("create"), 1)
 
 
 if __name__ == "__main__":

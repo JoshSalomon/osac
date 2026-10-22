@@ -89,6 +89,9 @@ ifeq ($(USE_LOCAL_OPERATOR),true)
 ifneq ($(PLATFORM),kind)
 $(error USE_LOCAL_OPERATOR=true requires PLATFORM=kind (a remote cluster cannot pull a localhost image))
 endif
+ifeq ($(shell printf '%s' '$(OPERATOR_IMAGE_TAG)' | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_.-]*' && echo valid),)
+$(error OPERATOR_IMAGE_TAG=$(OPERATOR_IMAGE_TAG) is not a valid image tag)
+endif
 endif
 ifneq ($(filter install,$(MAKECMDGOALS)),)
 ifeq ($(DRY_RUN),1)
@@ -393,7 +396,7 @@ AAP_LICENSE_FILE ?= values/$(PROFILE)/license.zip
 
 .PHONY: local-operator-image
 local-operator-image: ## Build the operator from this checkout and load it into Kind
-	$(MAKE) -C ../osac-operator image-build IMG=$(OPERATOR_IMAGE) CONTAINER_TOOL=$(CONTAINER_TOOL)
+	$(MAKE) -C ../osac-operator image-build IMG='$(OPERATOR_IMAGE)' CONTAINER_TOOL=$(CONTAINER_TOOL)
 	$(call kind-load-image,$(OPERATOR_IMAGE))
 
 .PHONY: install-osac

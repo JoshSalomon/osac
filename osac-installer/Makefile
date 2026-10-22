@@ -41,7 +41,15 @@ endif
 # a localhost image. The flag's --set values win over EXTRA_HELM_ARGS; use
 # OPERATOR_IMAGE_TAG to select another locally loaded tag.
 USE_LOCAL_OPERATOR ?= false
+# The tag is expanded into helm arguments and a shell command, so reject
+# anything that is not a plain image tag. The value reaches the shell through
+# the environment; it is never spliced into shell text.
 OPERATOR_IMAGE_TAG ?= it
+export OPERATOR_IMAGE_TAG
+OPERATOR_IMAGE_TAG_VALID := $(shell case "$$OPERATOR_IMAGE_TAG" in (*[!A-Za-z0-9_.-]*|"") echo no ;; (*) echo yes ;; esac)
+ifneq ($(OPERATOR_IMAGE_TAG_VALID),yes)
+$(error OPERATOR_IMAGE_TAG is not a valid image tag; use letters, digits, dot, dash or underscore)
+endif
 OPERATOR_IMAGE := localhost/osac-operator:$(OPERATOR_IMAGE_TAG)
 OPERATOR_IMAGE_HELM_ARGS := --set operator.image.repository=localhost/osac-operator --set operator.image.tag=$(OPERATOR_IMAGE_TAG) --set operator.image.pullPolicy=Never
 ifeq ($(USE_LOCAL_OPERATOR),true)
@@ -89,9 +97,6 @@ endif
 ifeq ($(USE_LOCAL_OPERATOR),true)
 ifneq ($(PLATFORM),kind)
 $(error USE_LOCAL_OPERATOR=true requires PLATFORM=kind (a remote cluster cannot pull a localhost image))
-endif
-ifeq ($(shell printf '%s' '$(OPERATOR_IMAGE_TAG)' | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_.-]*' && echo valid),)
-$(error OPERATOR_IMAGE_TAG=$(OPERATOR_IMAGE_TAG) is not a valid image tag)
 endif
 endif
 ifneq ($(filter install,$(MAKECMDGOALS)),)

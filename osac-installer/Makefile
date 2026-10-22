@@ -94,13 +94,6 @@ endif
 ifndef NS
 $(error NS is required (namespace for OSAC instance, e.g. NS=osac))
 endif
-# NS reaches shell text through KIND_RUNTIME_ENV and helm arguments, so accept
-# only a valid Kubernetes namespace name.
-export NS
-NS_VALID := $(shell [ -n "$$NS" ] && printf '%s' "$$NS" | grep -Eqx '[a-z0-9]([a-z0-9-]*[a-z0-9])?' && [ "$$(printf '%s' "$$NS" | wc -l)" -eq 0 ] && [ $${#NS} -le 63 ] && echo yes || echo no)
-ifneq ($(NS_VALID),yes)
-$(error NS must be a valid Kubernetes namespace name)
-endif
 ifeq ($(PLATFORM),kind)
 ifeq ($(filter $(PROFILE),dev dev-full),)
 $(error PLATFORM=kind only supports PROFILE=dev or PROFILE=dev-full)
@@ -228,6 +221,17 @@ DEV_FULL_HELM_POST_RENDERER :=
 OSAC_HELM_FORCE_CONFLICTS :=
 endif
 
+# NS reaches shell text through KIND_RUNTIME_ENV and helm arguments, so accept
+# only a valid Kubernetes namespace name. Targets that do not take NS leave it
+# unset; the install targets require it in the block above.
+ifneq ($(strip $(NS)),)
+export NS
+NS_VALID := $(shell [ -n "$$NS" ] && printf '%s' "$$NS" | grep -Eqx '[a-z0-9]([a-z0-9-]*[a-z0-9])?' && [ "$$(printf '%s' "$$NS" | wc -l)" -eq 0 ] && [ $${#NS} -le 63 ] && echo yes || echo no)
+ifneq ($(NS_VALID),yes)
+$(error NS must be a valid Kubernetes namespace name)
+endif
+endif
+
 # Container tool and Kind cluster config.
 CONTAINER_TOOL ?= $(or $(shell command -v podman 2>/dev/null),$(shell command -v docker 2>/dev/null),$(error neither podman nor docker found in PATH))
 # CONTAINER_TOOL is interpolated into shell recipes and passed to child makes,
@@ -244,6 +248,13 @@ endif
 # this keeps an existing Docker- or Podman-backed cluster on the same runtime
 # for all installer operations. On other platforms a podman container tool
 # means there is no Docker socket, so use the podman provider.
+# KIND_EXPERIMENTAL_PROVIDER is expanded into shell recipes through
+# KIND_RUNTIME_ENV, so accept only the providers kind supports.
+export KIND_EXPERIMENTAL_PROVIDER
+KIND_EXPERIMENTAL_PROVIDER_VALID := $(shell if [ -z "$$KIND_EXPERIMENTAL_PROVIDER" ]; then echo yes; elif printf '%s' "$$KIND_EXPERIMENTAL_PROVIDER" | grep -Eqx 'docker|podman' && [ "$$(printf '%s' "$$KIND_EXPERIMENTAL_PROVIDER" | wc -l)" -eq 0 ]; then echo yes; else echo no; fi)
+ifneq ($(KIND_EXPERIMENTAL_PROVIDER_VALID),yes)
+$(error KIND_EXPERIMENTAL_PROVIDER must be docker or podman)
+endif
 KIND_RUNTIME_PROVIDER := $(strip $(KIND_EXPERIMENTAL_PROVIDER))
 ifeq ($(KIND_RUNTIME_PROVIDER),)
 ifeq ($(HOST_IS_MAC_ARM),true)

@@ -23,6 +23,7 @@ BASE_ARGS = ["PLATFORM=kind", "PROFILE=dev", "NS=osac"]
 
 class InstallerMakeTest(unittest.TestCase):
     def make(self, target, *args, **env):
+        """Run make with -n so recipes are printed, never executed."""
         return subprocess.run(
             [shutil.which("make"), "-C", str(INSTALLER), "-n", target, *args],
             env={**os.environ, **env},
@@ -32,17 +33,21 @@ class InstallerMakeTest(unittest.TestCase):
         )
 
     def install(self, *extra, **env):
+        """Dry-run install-osac with the base arguments."""
         return self.make("install-osac", *BASE_ARGS, *extra, **env)
 
     def local_image(self, *extra, **env):
+        """Dry-run install-osac with the local operator image enabled."""
         return self.install("USE_LOCAL_OPERATOR=true", *extra, **env)
 
     def built_image(self, output):
+        """Return the image reference the build step would produce."""
         match = re.search(r"image-build IMG='?(localhost/osac-operator:[^\s']+)", output)
         self.assertIsNotNone(match, output)
         return match.group(1)
 
     def helm_tag(self, output):
+        """Return the operator image tag passed to Helm."""
         match = re.search(r"--set(?:-string)? operator\.image\.tag=([^\s\\]+)", output)
         self.assertIsNotNone(match, output)
         return match.group(1)
@@ -50,12 +55,14 @@ class InstallerMakeTest(unittest.TestCase):
     # -- CONTAINER_TOOL and NS validation -------------------------------
 
     def test_accepts_a_plain_tool_name_and_an_absolute_path(self):
+        """A bare name and an absolute path are both accepted."""
         for tool in ("podman", "docker", "/usr/bin/podman"):
             with self.subTest(tool=tool):
                 result = self.install(CONTAINER_TOOL=tool)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_rejects_shell_syntax_in_the_container_tool(self):
+        """Shell syntax in CONTAINER_TOOL fails before anything runs."""
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "pwned"
             for tool in (
@@ -73,6 +80,7 @@ class InstallerMakeTest(unittest.TestCase):
                     self.assertFalse(marker.exists())
 
     def test_rejects_an_invalid_namespace(self):
+        """An invalid or injected namespace is rejected."""
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "pwned"
             for namespace in (
@@ -86,14 +94,49 @@ class InstallerMakeTest(unittest.TestCase):
                     self.assertIn("NS", result.stderr)
                     self.assertFalse(marker.exists())
 
+    def test_rejects_shell_syntax_in_the_kind_provider(self):
+        """Only docker and podman are accepted as the kind provider."""
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "pwned"
+            for provider in (f"podman; touch {marker} #", "podman x", "nerdctl"):
+                with self.subTest(provider=provider):
+                    result = self.make(
+                        "install-infra", *BASE_ARGS, KIND_EXPERIMENTAL_PROVIDER=provider
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("KIND_EXPERIMENTAL_PROVIDER", result.stderr)
+                    self.assertFalse(marker.exists())
+
+    def test_accepts_the_supported_kind_providers(self):
+        """Unset, docker and podman providers are accepted."""
+        for provider in ("", "docker", "podman"):
+            with self.subTest(provider=provider):
+                result = self.make(
+                    "install-infra", *BASE_ARGS, KIND_EXPERIMENTAL_PROVIDER=provider
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_standalone_targets_validate_the_namespace(self):
+        """A target outside the install set still validates NS."""
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "pwned"
+            result = self.make(
+                "local-operator-image", f"NS=osac; touch {marker} #"
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("NS", result.stderr)
+            self.assertFalse(marker.exists())
+
     # -- Local operator image -------------------------------------------
 
     def test_tag_is_passed_to_helm_as_a_string(self):
+        """The tag reaches Helm through --set-string."""
         result = self.local_image()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--set-string operator.image.tag=", result.stdout)
 
     def test_rejects_tags_the_runtime_cannot_use(self):
+        """Tags the runtime cannot use are rejected."""
         for tag in (".", "-it", "a" * 129, "a,b", "a b", "a\nb"):
             with self.subTest(tag=tag):
                 result = self.local_image(f"OPERATOR_IMAGE_TAG={tag}")
@@ -101,6 +144,7 @@ class InstallerMakeTest(unittest.TestCase):
                 self.assertIn("OPERATOR_IMAGE_TAG", result.stderr)
 
     def test_build_load_and_helm_share_one_fresh_tag_per_run(self):
+        """One tag per run, different in each run."""
         first = self.local_image()
         self.assertEqual(first.returncode, 0, first.stderr)
         time.sleep(1.1)
@@ -114,12 +158,14 @@ class InstallerMakeTest(unittest.TestCase):
         self.assertNotEqual(self.helm_tag(first.stdout), self.helm_tag(second.stdout))
 
     def test_suites_keep_a_stable_tag(self):
+        """The integration suites keep the stable "it" tag."""
         result = self.make("test", *BASE_ARGS, "SUITE=operator")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.helm_tag(result.stdout), "it")
         self.assertIn("localhost/osac-operator:it", result.stdout)
 
     def test_dev_full_builds_through_the_kind_runtime(self):
+        """dev-full builds through the kind runtime, not the rootless tool."""
         result = self.make(
             "install-osac", "PLATFORM=kind", "PROFILE=dev-full", "NS=osac",
             "USE_LOCAL_OPERATOR=true",
@@ -132,6 +178,7 @@ class InstallerMakeTest(unittest.TestCase):
     # -- Kind provider --------------------------------------------------
 
     def test_install_infra_uses_the_selected_kind_provider(self):
+        """Cluster creation uses the selected kind provider."""
         result = self.make("install-infra", *BASE_ARGS)
         self.assertEqual(result.returncode, 0, result.stderr)
         for command in ("kind get nodes", "kind create cluster", "kind export kubeconfig"):
@@ -144,6 +191,7 @@ class InstallerMakeTest(unittest.TestCase):
                     self.assertIn(f"KIND_EXPERIMENTAL_PROVIDER=podman {command}", line)
 
     def test_uninstall_infra_uses_the_selected_kind_provider(self):
+        """Cluster deletion uses the selected kind provider."""
         result = self.make("uninstall-infra", *BASE_ARGS)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("KIND_EXPERIMENTAL_PROVIDER=podman kind delete cluster", result.stdout)
@@ -151,6 +199,7 @@ class InstallerMakeTest(unittest.TestCase):
     # -- Dry run --------------------------------------------------------
 
     def test_dry_run_renders_the_local_operator_image(self):
+        """The dry run renders the same local operator image as the install."""
         result = self.make("install-dry-run", *BASE_ARGS, "USE_LOCAL_OPERATOR=true")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--set-string operator.image.tag=", result.stdout)

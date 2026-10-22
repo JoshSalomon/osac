@@ -97,7 +97,7 @@ endif
 # NS reaches shell text through KIND_RUNTIME_ENV and helm arguments, so accept
 # only a valid Kubernetes namespace name.
 export NS
-NS_VALID := $(shell [ -n "$$NS" ] && printf '%s' "$$NS" | grep -Eqx '[a-z0-9]([a-z0-9-]*[a-z0-9])?' && [ $${#NS} -le 63 ] && echo yes || echo no)
+NS_VALID := $(shell [ -n "$$NS" ] && printf '%s' "$$NS" | grep -Eqx '[a-z0-9]([a-z0-9-]*[a-z0-9])?' && [ "$$(printf '%s' "$$NS" | wc -l)" -eq 0 ] && [ $${#NS} -le 63 ] && echo yes || echo no)
 ifneq ($(NS_VALID),yes)
 $(error NS must be a valid Kubernetes namespace name)
 endif

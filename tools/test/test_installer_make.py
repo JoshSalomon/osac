@@ -63,6 +63,7 @@ class InstallerMakeTest(unittest.TestCase):
                 f"podman && touch {marker}",
                 "podman x",
                 "./podman",
+                "podman\nx",
                 "",
             ):
                 with self.subTest(tool=tool):
@@ -74,7 +75,9 @@ class InstallerMakeTest(unittest.TestCase):
     def test_rejects_an_invalid_namespace(self):
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "pwned"
-            for namespace in (f"osac; touch {marker} #", "Osac", "-osac", "osac-", "x" * 64):
+            for namespace in (
+                f"osac; touch {marker} #", "Osac", "-osac", "osac-", "x" * 64, "osac\nx",
+            ):
                 with self.subTest(namespace=namespace):
                     result = self.make(
                         "install-osac", "PLATFORM=kind", "PROFILE=dev", f"NS={namespace}"
@@ -91,7 +94,7 @@ class InstallerMakeTest(unittest.TestCase):
         self.assertIn("--set-string operator.image.tag=", result.stdout)
 
     def test_rejects_tags_the_runtime_cannot_use(self):
-        for tag in (".", "-it", "a" * 129, "a,b", "a b"):
+        for tag in (".", "-it", "a" * 129, "a,b", "a b", "a\nb"):
             with self.subTest(tag=tag):
                 result = self.local_image(f"OPERATOR_IMAGE_TAG={tag}")
                 self.assertNotEqual(result.returncode, 0, result.stdout)

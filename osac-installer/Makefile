@@ -41,17 +41,25 @@ endif
 # a localhost image. The flag's --set values win over EXTRA_HELM_ARGS; use
 # OPERATOR_IMAGE_TAG to select another locally loaded tag.
 USE_LOCAL_OPERATOR ?= false
+# With USE_LOCAL_OPERATOR a rebuilt image must change the Deployment so the
+# operator pod rolls, so default to a tag unique to this invocation. It is
+# computed once, so build, load and Helm all use the same value.
+ifeq ($(USE_LOCAL_OPERATOR),true)
+LOCAL_BUILD_STAMP := $(shell date -u +%Y%m%d%H%M%S)
+OPERATOR_IMAGE_TAG ?= local-$(LOCAL_BUILD_STAMP)
+else
+OPERATOR_IMAGE_TAG ?= it
+endif
 # The tag is expanded into helm arguments and a shell command, so reject
 # anything that is not a plain image tag. The value reaches the shell through
 # the environment; it is never spliced into shell text.
-OPERATOR_IMAGE_TAG ?= it
 export OPERATOR_IMAGE_TAG
-OPERATOR_IMAGE_TAG_VALID := $(shell case "$$OPERATOR_IMAGE_TAG" in (*[!A-Za-z0-9_.-]*|"") echo no ;; (*) echo yes ;; esac)
+OPERATOR_IMAGE_TAG_VALID := $(shell [ -n "$$OPERATOR_IMAGE_TAG" ] && printf '%s' "$$OPERATOR_IMAGE_TAG" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_.-]*' && [ "$$(printf '%s' "$$OPERATOR_IMAGE_TAG" | wc -l)" -eq 0 ] && [ $${#OPERATOR_IMAGE_TAG} -le 128 ] && echo yes || echo no)
 ifneq ($(OPERATOR_IMAGE_TAG_VALID),yes)
 $(error OPERATOR_IMAGE_TAG is not a valid image tag; use letters, digits, dot, dash or underscore)
 endif
 OPERATOR_IMAGE := localhost/osac-operator:$(OPERATOR_IMAGE_TAG)
-OPERATOR_IMAGE_HELM_ARGS := --set operator.image.repository=localhost/osac-operator --set operator.image.tag=$(OPERATOR_IMAGE_TAG) --set operator.image.pullPolicy=Never
+OPERATOR_IMAGE_HELM_ARGS := --set operator.image.repository=localhost/osac-operator --set-string operator.image.tag=$(OPERATOR_IMAGE_TAG) --set operator.image.pullPolicy=Never
 ifeq ($(USE_LOCAL_OPERATOR),true)
 LOCAL_OPERATOR_HELM_ARGS := $(OPERATOR_IMAGE_HELM_ARGS)
 endif
@@ -330,13 +338,13 @@ else ifeq ($(PROFILE),dev-full)
 	@$(KIND_RUNTIME_CMD) check
 	@$(KIND_RUNTIME_CMD) create-cluster $(KIND_CLUSTER_NAME) $(KIND_CONFIG) $(KIND_KUBECONFIG)
 else
-	@if kind get nodes --name $(KIND_CLUSTER_NAME) | grep -q .; then \
+	@if $(KIND_RUNTIME_ENV) kind get nodes --name $(KIND_CLUSTER_NAME) | grep -q .; then \
 		echo "Kind cluster '$(KIND_CLUSTER_NAME)' already exists"; \
 	else \
 		echo "Creating Kind cluster '$(KIND_CLUSTER_NAME)'..."; \
-		kind create cluster --name $(KIND_CLUSTER_NAME) --config $(KIND_CONFIG) --wait 60s; \
+		$(KIND_RUNTIME_ENV) kind create cluster --name $(KIND_CLUSTER_NAME) --config $(KIND_CONFIG) --wait 60s; \
 	fi
-	@kind export kubeconfig --name $(KIND_CLUSTER_NAME) --kubeconfig $(KIND_KUBECONFIG)
+	@$(KIND_RUNTIME_ENV) kind export kubeconfig --name $(KIND_CLUSTER_NAME) --kubeconfig $(KIND_KUBECONFIG)
 endif
 ifeq ($(HOST_IS_MAC_ARM),true)
 	@$(KIND_RUNTIME_ENV) $(KIND_ARM64_CLI_IMAGE_SCRIPT) $(KIND_CLUSTER_NAME) $(KIND_ARM64_CLI_IMAGE)
@@ -405,7 +413,7 @@ else
 	helm uninstall envoy-gateway --namespace envoy-gateway --ignore-not-found
 	helm uninstall trust-manager --namespace cert-manager --ignore-not-found
 	helm uninstall cert-manager --namespace cert-manager --ignore-not-found
-	kind delete cluster --name $(KIND_CLUSTER_NAME)
+	$(KIND_RUNTIME_ENV) kind delete cluster --name $(KIND_CLUSTER_NAME)
 endif
 else
 	helm uninstall osac-infra --namespace osac-infra --ignore-not-found --wait --timeout 10m
@@ -418,7 +426,11 @@ AAP_LICENSE_FILE ?= values/$(PROFILE)/license.zip
 
 .PHONY: local-operator-image
 local-operator-image: ## Build the operator from this checkout and load it into Kind
-	$(MAKE) -C ../osac-operator image-build IMG='$(OPERATOR_IMAGE)' CONTAINER_TOOL=$(CONTAINER_TOOL)
+ifeq ($(KIND_RUNTIME_REQUIRED),true)
+	$(call kind-container-build,-t $(OPERATOR_IMAGE) -f ../osac-operator/Containerfile ..)
+else
+	$(MAKE) -C ../osac-operator image-build IMG='$(OPERATOR_IMAGE)' CONTAINER_TOOL='$(CONTAINER_TOOL)'
+endif
 	$(call kind-load-image,$(OPERATOR_IMAGE))
 
 .PHONY: install-osac
@@ -526,7 +538,7 @@ endif
 		--namespace $(NS) \
 		--set-string global.osacDeploymentId=$(NS)/osac \
 		$(if $(filter openshift,$(PLATFORM)),--set service.externalHostname=fulfillment-api-$(NS).$(DRY_RUN_CLUSTER_DOMAIN) --set service.internalHostname=fulfillment-internal-api-$(NS).$(DRY_RUN_CLUSTER_DOMAIN) --set global.clusterDomain=$(DRY_RUN_CLUSTER_DOMAIN) --set ui.auth.oidcIssuerURL=https://keycloak-keycloak.$(DRY_RUN_CLUSTER_DOMAIN)/realms/osac) \
-		$(EXTRA_HELM_ARGS)
+		$(EXTRA_HELM_ARGS) $(LOCAL_OPERATOR_HELM_ARGS)
 ifeq ($(PROFILE),dev-full)
 	helm dependency build charts/osac-devstack
 	helm template osac-devstack charts/osac-devstack \

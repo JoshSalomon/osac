@@ -43,8 +43,9 @@ endif
 USE_LOCAL_OPERATOR ?= false
 OPERATOR_IMAGE_TAG ?= it
 OPERATOR_IMAGE := localhost/osac-operator:$(OPERATOR_IMAGE_TAG)
+OPERATOR_IMAGE_HELM_ARGS := --set operator.image.repository=localhost/osac-operator --set operator.image.tag=$(OPERATOR_IMAGE_TAG) --set operator.image.pullPolicy=Never
 ifeq ($(USE_LOCAL_OPERATOR),true)
-LOCAL_OPERATOR_HELM_ARGS := --set operator.image.repository=localhost/osac-operator --set operator.image.tag=$(OPERATOR_IMAGE_TAG) --set operator.image.pullPolicy=Never
+LOCAL_OPERATOR_HELM_ARGS := $(OPERATOR_IMAGE_HELM_ARGS)
 endif
 
 DRY_RUN ?= 0
@@ -519,15 +520,8 @@ uninstall: uninstall-osac uninstall-infra ## Full uninstall: osac + infra (PLATF
 
 ##@ Entity: Test
 
-# The fulfillment and operator suites both need the operator built from this
-# checkout loaded into the cluster.
-TEST_IMAGE_PREREQS :=
-ifneq ($(filter fulfillment operator,$(SUITE)),)
-TEST_IMAGE_PREREQS += local-operator-image
-endif
-
 .PHONY: test
-test: $(TEST_IMAGE_PREREQS) ## Run integration tests (SUITE= required: all|fulfillment|operator|bmf)
+test: $(if $(filter fulfillment operator,$(SUITE)),local-operator-image) ## Run integration tests (SUITE= required: all|fulfillment|operator|bmf)
 ifeq ($(SUITE),all)
 	$(MAKE) test SUITE=fulfillment
 	$(MAKE) test SUITE=operator
@@ -543,10 +537,10 @@ ifeq ($(SUITE),fulfillment)
 # Manager capability discovery and readiness both require the operator, so keep them isolated from the service-only suite.
 	cd ../fulfillment-service && KIND_CLUSTER="$(KIND_CLUSTER_NAME)" IT_HTTPS_PORT="$(FULFILLMENT_IT_HTTPS_PORT)" IT_MCP_DEPLOYED_URL="$(MCP_TEST_URL)" ginkgo run --timeout 1h15m -v --skip 'NetworkClass manager (capability discovery|readiness)' $(FULFILLMENT_GINKGO_ARGS) it
 	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
-		EXTRA_HELM_ARGS="--set service.images.service.repository=localhost/fulfillment-service --set service.images.service.tag=it --set service.images.service.pullPolicy=Never --set service.controller.sync=false --set operator.enabled=true --set operator.image.repository=localhost/osac-operator --set operator.image.tag=it --set operator.image.pullPolicy=Never --set operator.networkManagers.enabled=true --set global.networking.networkClass.enabled=false"
+		EXTRA_HELM_ARGS="--set service.images.service.repository=localhost/fulfillment-service --set service.images.service.tag=it --set service.images.service.pullPolicy=Never --set service.controller.sync=false --set operator.enabled=true $(OPERATOR_IMAGE_HELM_ARGS) --set operator.networkManagers.enabled=true --set global.networking.networkClass.enabled=false"
 	cd ../fulfillment-service && KIND_CLUSTER="$(KIND_CLUSTER_NAME)" IT_HTTPS_PORT="$(FULFILLMENT_IT_HTTPS_PORT)" ginkgo run --timeout 1h -v --focus 'NetworkClass manager capability discovery' it
 	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
-		EXTRA_HELM_ARGS="--set service.enabled=true --set service.images.service.repository=localhost/fulfillment-service --set service.images.service.tag=it --set service.images.service.pullPolicy=Never --set service.controller.sync=false --set operator.enabled=true --set operator.image.repository=localhost/osac-operator --set operator.image.tag=it --set operator.image.pullPolicy=Never --set operator.controllers.tenant=false --set operator.controllers.storage=false --set operator.controllers.volume=false --set operator.controllers.networking=true --set operator.controllers.networkingProvisioning=false --set operator.networkManagers.enabled=true --set operator.networkManagers.fabricManagers.netris.enabled=true --set global.services.caas.enabled=false --set global.services.vmaas.enabled=false --set global.services.bmaas.enabled=false --set global.services.maas.enabled=false --set global.networking.networkClass.enabled=false --set aap.instanceGroups.publishTemplates.enabled=false"
+		EXTRA_HELM_ARGS="--set service.enabled=true --set service.images.service.repository=localhost/fulfillment-service --set service.images.service.tag=it --set service.images.service.pullPolicy=Never --set service.controller.sync=false --set operator.enabled=true $(OPERATOR_IMAGE_HELM_ARGS) --set operator.controllers.tenant=false --set operator.controllers.storage=false --set operator.controllers.volume=false --set operator.controllers.networking=true --set operator.controllers.networkingProvisioning=false --set operator.networkManagers.enabled=true --set operator.networkManagers.fabricManagers.netris.enabled=true --set global.services.caas.enabled=false --set global.services.vmaas.enabled=false --set global.services.bmaas.enabled=false --set global.services.maas.enabled=false --set global.networking.networkClass.enabled=false --set aap.instanceGroups.publishTemplates.enabled=false"
 	cd ../fulfillment-service && KIND_CLUSTER="$(KIND_CLUSTER_NAME)" IT_HTTPS_PORT="$(FULFILLMENT_IT_HTTPS_PORT)" ginkgo run --timeout 15m -v --focus 'NetworkClass manager readiness' it
 	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
 		EXTRA_HELM_ARGS="--set service.images.service.repository=localhost/fulfillment-service --set service.images.service.tag=it --set service.images.service.pullPolicy=Never --set service.controller.sync=false --set global.services.bmaas.enabled=false --set operator.enabled=false --set operator.networkManagers.enabled=true --set global.networking.networkClass.enabled=false"
@@ -554,7 +548,7 @@ ifeq ($(SUITE),fulfillment)
 endif
 ifeq ($(SUITE),operator)
 	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
-		EXTRA_HELM_ARGS="--set operator.image.repository=localhost/osac-operator --set operator.image.tag=it --set operator.image.pullPolicy=Never --set operator.fulfillment.serverAddress= --set service.enabled=false --set hubAccess.enabled=false --set validation.enabled=false --set global.fulfillmentTrust.enabled=false --set global.networking.networkClass.enabled=false"
+		EXTRA_HELM_ARGS="$(OPERATOR_IMAGE_HELM_ARGS) --set operator.fulfillment.serverAddress= --set service.enabled=false --set hubAccess.enabled=false --set validation.enabled=false --set global.fulfillmentTrust.enabled=false --set global.networking.networkClass.enabled=false"
 	cd ../osac-operator && ginkgo run --timeout 30m -v test/integration
 endif
 ifeq ($(SUITE),bmf)

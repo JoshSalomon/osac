@@ -36,6 +36,17 @@ ifeq ($(MCP_TEST_ENABLED),true)
 MCP_TEST_HELM_ARGS := --set service.mcp.enabled=true --set-string service.mcp.externalHostname=mcp.osac.localhost --set service.mcp.externalPort=8443
 MCP_TEST_URL := https://mcp.osac.localhost:8443
 endif
+# Build the operator from this checkout and install that image instead of the
+# registry image the values files pin. Kind only: a remote cluster cannot pull
+# a localhost image. The flag's --set values win over EXTRA_HELM_ARGS; use
+# OPERATOR_IMAGE_TAG to select another locally loaded tag.
+USE_LOCAL_OPERATOR ?= false
+OPERATOR_IMAGE_REPOSITORY ?= localhost/osac-operator
+OPERATOR_IMAGE_TAG ?= it
+ifeq ($(USE_LOCAL_OPERATOR),true)
+LOCAL_OPERATOR_HELM_ARGS := --set operator.image.repository=$(OPERATOR_IMAGE_REPOSITORY) --set operator.image.tag=$(OPERATOR_IMAGE_TAG) --set operator.image.pullPolicy=Never
+endif
+
 DRY_RUN ?= 0
 DRY_RUN_HELM_FLAGS := $(filter --%,$(EXTRA_HELM_ARGS))
 DRY_RUN_INVALID_HELM_FLAGS := $(filter-out --set --set-string --set=% --set-string=%,$(DRY_RUN_HELM_FLAGS))
@@ -69,6 +80,14 @@ endif
 ifeq ($(PLATFORM),kind)
 ifeq ($(filter $(PROFILE),dev dev-full),)
 $(error PLATFORM=kind only supports PROFILE=dev or PROFILE=dev-full)
+endif
+endif
+ifeq ($(filter $(USE_LOCAL_OPERATOR),true false),)
+$(error USE_LOCAL_OPERATOR=$(USE_LOCAL_OPERATOR) is invalid; must be true or false)
+endif
+ifeq ($(USE_LOCAL_OPERATOR),true)
+ifneq ($(PLATFORM),kind)
+$(error USE_LOCAL_OPERATOR=true requires PLATFORM=kind (a remote cluster cannot pull a localhost image))
 endif
 endif
 ifneq ($(filter install,$(MAKECMDGOALS)),)
@@ -187,6 +206,9 @@ endif
 
 # Container tool and Kind cluster config.
 CONTAINER_TOOL ?= $(or $(shell command -v podman 2>/dev/null),$(shell command -v docker 2>/dev/null),$(error neither podman nor docker found in PATH))
+# kind defaults to the Docker provider; follow the container tool in use so a
+# podman-only host does not also need KIND_EXPERIMENTAL_PROVIDER=podman.
+KIND_PROVIDER_ENV := $(if $(filter podman,$(notdir $(CONTAINER_TOOL))),KIND_EXPERIMENTAL_PROVIDER=podman,)
 # On Apple Silicon, honor an explicitly selected container tool when the Kind
 # provider has not been set separately. This keeps an existing Docker- or
 # Podman-backed cluster on the same runtime for all installer operations.
@@ -239,9 +261,9 @@ define kind-load-image
 		tmpfile=$$(mktemp /tmp/kind-image-XXXXXX.tar); \
 		trap 'rm -f "$$tmpfile"' EXIT; \
 		$(CONTAINER_TOOL) save $(1) -o "$$tmpfile"; \
-		kind load image-archive "$$tmpfile" --name $(KIND_CLUSTER_NAME); \
+		$(KIND_PROVIDER_ENV) kind load image-archive "$$tmpfile" --name $(KIND_CLUSTER_NAME); \
 	else \
-		kind load docker-image $(1) --name $(KIND_CLUSTER_NAME); \
+		$(KIND_PROVIDER_ENV) kind load docker-image $(1) --name $(KIND_CLUSTER_NAME); \
 	fi
 endef
 
@@ -368,8 +390,18 @@ endif
 
 AAP_LICENSE_FILE ?= values/$(PROFILE)/license.zip
 
+INSTALL_OSAC_PREREQS :=
+ifeq ($(USE_LOCAL_OPERATOR),true)
+INSTALL_OSAC_PREREQS += local-operator-image
+endif
+
+.PHONY: local-operator-image
+local-operator-image: ## Build the operator from this checkout and load it into Kind
+	$(call kind-container-build,--build-arg GODEBUG=$(GODEBUG) -t $(OPERATOR_IMAGE_REPOSITORY):$(OPERATOR_IMAGE_TAG) -f ../osac-operator/Containerfile ..)
+	$(call kind-load-image,$(OPERATOR_IMAGE_REPOSITORY):$(OPERATOR_IMAGE_TAG))
+
 .PHONY: install-osac
-install-osac: ## Install OSAC instance (PLATFORM= PROFILE= NS= required)
+install-osac: $(INSTALL_OSAC_PREREQS) ## Install OSAC instance (PLATFORM= PROFILE= NS= required)
 	rm -rf $(OSAC_CHART)/charts
 	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build $(OSAC_CHART)
 ifneq ($(PLATFORM),kind)
@@ -392,7 +424,7 @@ endif
 		--set-string global.osacDeploymentId=$(NS)/osac \
 		$(if $(DOMAIN),--set service.externalHostname=fulfillment-api-$(NS).$(DOMAIN) --set service.internalHostname=fulfillment-internal-api-$(NS).$(DOMAIN) --set global.clusterDomain=$(DOMAIN) --set ui.auth.oidcIssuerURL=https://keycloak-keycloak.$(DOMAIN)/realms/osac) \
 		$(INSTANCE_HELM_ARGS) \
-		$(EXTRA_HELM_ARGS) $(OSAC_HELM_FORCE_CONFLICTS) \
+		$(EXTRA_HELM_ARGS) $(LOCAL_OPERATOR_HELM_ARGS) $(OSAC_HELM_FORCE_CONFLICTS) \
 		--wait --timeout 40m
 
 .PHONY: uninstall-osac

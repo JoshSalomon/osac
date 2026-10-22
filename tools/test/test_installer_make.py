@@ -116,23 +116,31 @@ class InstallerMakeTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_standalone_targets_validate_the_namespace(self):
-        """A target outside the install set still validates NS."""
+    def test_local_operator_image_validates_the_namespace(self):
+        """NS is rejected on the local image target too."""
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "pwned"
             result = self.make(
-                "local-operator-image", f"NS=osac; touch {marker} #"
+                "local-operator-image", "PLATFORM=kind", "PROFILE=dev",
+                f"NS=osac; touch {marker} #",
             )
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn("NS", result.stderr)
             self.assertFalse(marker.exists())
 
-    def test_standalone_targets_validate_the_profile(self):
-        """A target outside the install set still rejects a hostile PROFILE."""
+    def test_local_operator_image_requires_the_shared_arguments(self):
+        """The target is gated by the same PLATFORM/PROFILE/NS validation."""
+        result = self.make("local-operator-image")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("PLATFORM", result.stderr)
+
+    def test_local_operator_image_validates_the_profile(self):
+        """PROFILE is rejected on the local image target too."""
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "pwned"
             result = self.make(
-                "local-operator-image", f"PROFILE=x; touch {marker} #"
+                "local-operator-image", "PLATFORM=kind", "NS=osac",
+                f"PROFILE=x; touch {marker} #",
             )
             self.assertNotEqual(result.returncode, 0, result.stdout)
             self.assertIn("PROFILE", result.stderr)

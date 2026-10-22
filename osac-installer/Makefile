@@ -41,10 +41,10 @@ endif
 # a localhost image. The flag's --set values win over EXTRA_HELM_ARGS; use
 # OPERATOR_IMAGE_TAG to select another locally loaded tag.
 USE_LOCAL_OPERATOR ?= false
-OPERATOR_IMAGE_REPOSITORY ?= localhost/osac-operator
 OPERATOR_IMAGE_TAG ?= it
+OPERATOR_IMAGE := localhost/osac-operator:$(OPERATOR_IMAGE_TAG)
 ifeq ($(USE_LOCAL_OPERATOR),true)
-LOCAL_OPERATOR_HELM_ARGS := --set operator.image.repository=$(OPERATOR_IMAGE_REPOSITORY) --set operator.image.tag=$(OPERATOR_IMAGE_TAG) --set operator.image.pullPolicy=Never
+LOCAL_OPERATOR_HELM_ARGS := --set operator.image.repository=localhost/osac-operator --set operator.image.tag=$(OPERATOR_IMAGE_TAG) --set operator.image.pullPolicy=Never
 endif
 
 DRY_RUN ?= 0
@@ -206,18 +206,19 @@ endif
 
 # Container tool and Kind cluster config.
 CONTAINER_TOOL ?= $(or $(shell command -v podman 2>/dev/null),$(shell command -v docker 2>/dev/null),$(error neither podman nor docker found in PATH))
-# kind defaults to the Docker provider; follow the container tool in use so a
-# podman-only host does not also need KIND_EXPERIMENTAL_PROVIDER=podman.
-KIND_PROVIDER_ENV := $(if $(filter podman,$(notdir $(CONTAINER_TOOL))),KIND_EXPERIMENTAL_PROVIDER=podman,)
-# On Apple Silicon, honor an explicitly selected container tool when the Kind
-# provider has not been set separately. This keeps an existing Docker- or
-# Podman-backed cluster on the same runtime for all installer operations.
+# kind defaults to the Docker provider. On Apple Silicon, honor an explicitly
+# selected container tool when the Kind provider has not been set separately;
+# this keeps an existing Docker- or Podman-backed cluster on the same runtime
+# for all installer operations. On other platforms a podman container tool
+# means there is no Docker socket, so use the podman provider.
 KIND_RUNTIME_PROVIDER := $(strip $(KIND_EXPERIMENTAL_PROVIDER))
-ifeq ($(HOST_IS_MAC_ARM),true)
 ifeq ($(KIND_RUNTIME_PROVIDER),)
+ifeq ($(HOST_IS_MAC_ARM),true)
 ifneq ($(filter command line environment,$(origin CONTAINER_TOOL)),)
 KIND_RUNTIME_PROVIDER := $(notdir $(CONTAINER_TOOL))
 endif
+else ifeq ($(notdir $(CONTAINER_TOOL)),podman)
+KIND_RUNTIME_PROVIDER := podman
 endif
 endif
 KIND_RUNTIME_ENV := KIND_PROFILE=$(PROFILE) \
@@ -261,9 +262,9 @@ define kind-load-image
 		tmpfile=$$(mktemp /tmp/kind-image-XXXXXX.tar); \
 		trap 'rm -f "$$tmpfile"' EXIT; \
 		$(CONTAINER_TOOL) save $(1) -o "$$tmpfile"; \
-		$(KIND_PROVIDER_ENV) kind load image-archive "$$tmpfile" --name $(KIND_CLUSTER_NAME); \
+		$(KIND_RUNTIME_ENV) kind load image-archive "$$tmpfile" --name $(KIND_CLUSTER_NAME); \
 	else \
-		$(KIND_PROVIDER_ENV) kind load docker-image $(1) --name $(KIND_CLUSTER_NAME); \
+		$(KIND_RUNTIME_ENV) kind load docker-image $(1) --name $(KIND_CLUSTER_NAME); \
 	fi
 endef
 
@@ -390,18 +391,13 @@ endif
 
 AAP_LICENSE_FILE ?= values/$(PROFILE)/license.zip
 
-INSTALL_OSAC_PREREQS :=
-ifeq ($(USE_LOCAL_OPERATOR),true)
-INSTALL_OSAC_PREREQS += local-operator-image
-endif
-
 .PHONY: local-operator-image
 local-operator-image: ## Build the operator from this checkout and load it into Kind
-	$(call kind-container-build,--build-arg GODEBUG=$(GODEBUG) -t $(OPERATOR_IMAGE_REPOSITORY):$(OPERATOR_IMAGE_TAG) -f ../osac-operator/Containerfile ..)
-	$(call kind-load-image,$(OPERATOR_IMAGE_REPOSITORY):$(OPERATOR_IMAGE_TAG))
+	$(MAKE) -C ../osac-operator image-build IMG=$(OPERATOR_IMAGE) CONTAINER_TOOL=$(CONTAINER_TOOL)
+	$(call kind-load-image,$(OPERATOR_IMAGE))
 
 .PHONY: install-osac
-install-osac: $(INSTALL_OSAC_PREREQS) ## Install OSAC instance (PLATFORM= PROFILE= NS= required)
+install-osac: $(if $(filter true,$(USE_LOCAL_OPERATOR)),local-operator-image) ## Install OSAC instance (PLATFORM= PROFILE= NS= required)
 	rm -rf $(OSAC_CHART)/charts
 	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build $(OSAC_CHART)
 ifneq ($(PLATFORM),kind)
@@ -520,8 +516,15 @@ uninstall: uninstall-osac uninstall-infra ## Full uninstall: osac + infra (PLATF
 
 ##@ Entity: Test
 
+# The fulfillment and operator suites both need the operator built from this
+# checkout loaded into the cluster.
+TEST_IMAGE_PREREQS :=
+ifneq ($(filter fulfillment operator,$(SUITE)),)
+TEST_IMAGE_PREREQS += local-operator-image
+endif
+
 .PHONY: test
-test: ## Run integration tests (SUITE= required: all|fulfillment|operator|bmf)
+test: $(TEST_IMAGE_PREREQS) ## Run integration tests (SUITE= required: all|fulfillment|operator|bmf)
 ifeq ($(SUITE),all)
 	$(MAKE) test SUITE=fulfillment
 	$(MAKE) test SUITE=operator
@@ -531,27 +534,23 @@ ifeq ($(SUITE),fulfillment)
 # Exercise event-driven reconciliation without full synchronization in every test phase.
 	$(call kind-container-build,--build-arg GODEBUG=$(GODEBUG) -t localhost/fulfillment-service:it -f ../fulfillment-service/Containerfile ..)
 	$(call kind-load-image,localhost/fulfillment-service:it)
-	$(call kind-container-build,--build-arg GODEBUG=$(GODEBUG) -t localhost/osac-operator:it -f ../osac-operator/Containerfile ..)
-	$(call kind-load-image,localhost/osac-operator:it)
-	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \
+	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
 		EXTRA_HELM_ARGS="--set service.images.service.repository=localhost/fulfillment-service --set service.images.service.tag=it --set service.images.service.pullPolicy=Never --set service.controller.sync=false --set operator.enabled=false --set operator.networkManagers.enabled=true --set global.networking.networkClass.enabled=false $(MCP_TEST_HELM_ARGS)"
 	@for f in ../fulfillment-service/it/crds/*.yaml; do kubectl apply --server-side --field-manager=helm --force-conflicts -f "$$f"; done
 # Manager capability discovery and readiness both require the operator, so keep them isolated from the service-only suite.
 	cd ../fulfillment-service && KIND_CLUSTER="$(KIND_CLUSTER_NAME)" IT_HTTPS_PORT="$(FULFILLMENT_IT_HTTPS_PORT)" IT_MCP_DEPLOYED_URL="$(MCP_TEST_URL)" ginkgo run --timeout 1h15m -v --skip 'NetworkClass manager (capability discovery|readiness)' $(FULFILLMENT_GINKGO_ARGS) it
-	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \
+	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
 		EXTRA_HELM_ARGS="--set service.images.service.repository=localhost/fulfillment-service --set service.images.service.tag=it --set service.images.service.pullPolicy=Never --set service.controller.sync=false --set operator.enabled=true --set operator.image.repository=localhost/osac-operator --set operator.image.tag=it --set operator.image.pullPolicy=Never --set operator.networkManagers.enabled=true --set global.networking.networkClass.enabled=false"
 	cd ../fulfillment-service && KIND_CLUSTER="$(KIND_CLUSTER_NAME)" IT_HTTPS_PORT="$(FULFILLMENT_IT_HTTPS_PORT)" ginkgo run --timeout 1h -v --focus 'NetworkClass manager capability discovery' it
-	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \
+	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
 		EXTRA_HELM_ARGS="--set service.enabled=true --set service.images.service.repository=localhost/fulfillment-service --set service.images.service.tag=it --set service.images.service.pullPolicy=Never --set service.controller.sync=false --set operator.enabled=true --set operator.image.repository=localhost/osac-operator --set operator.image.tag=it --set operator.image.pullPolicy=Never --set operator.controllers.tenant=false --set operator.controllers.storage=false --set operator.controllers.volume=false --set operator.controllers.networking=true --set operator.controllers.networkingProvisioning=false --set operator.networkManagers.enabled=true --set operator.networkManagers.fabricManagers.netris.enabled=true --set global.services.caas.enabled=false --set global.services.vmaas.enabled=false --set global.services.bmaas.enabled=false --set global.services.maas.enabled=false --set global.networking.networkClass.enabled=false --set aap.instanceGroups.publishTemplates.enabled=false"
 	cd ../fulfillment-service && KIND_CLUSTER="$(KIND_CLUSTER_NAME)" IT_HTTPS_PORT="$(FULFILLMENT_IT_HTTPS_PORT)" ginkgo run --timeout 15m -v --focus 'NetworkClass manager readiness' it
-	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \
+	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
 		EXTRA_HELM_ARGS="--set service.images.service.repository=localhost/fulfillment-service --set service.images.service.tag=it --set service.images.service.pullPolicy=Never --set service.controller.sync=false --set global.services.bmaas.enabled=false --set operator.enabled=false --set operator.networkManagers.enabled=true --set global.networking.networkClass.enabled=false"
 	cd ../fulfillment-service && KIND_CLUSTER="$(KIND_CLUSTER_NAME)" IT_HTTPS_PORT="$(FULFILLMENT_IT_HTTPS_PORT)" IT_TEST_SUITE=bmaas-disabled ginkgo run --timeout 1h -v --focus 'Service enablement' it
 endif
 ifeq ($(SUITE),operator)
-	$(call kind-container-build,--build-arg GODEBUG=$(GODEBUG) -t localhost/osac-operator:it -f ../osac-operator/Containerfile ..)
-	$(call kind-load-image,localhost/osac-operator:it)
-	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \
+	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
 		EXTRA_HELM_ARGS="--set operator.image.repository=localhost/osac-operator --set operator.image.tag=it --set operator.image.pullPolicy=Never --set operator.fulfillment.serverAddress= --set service.enabled=false --set hubAccess.enabled=false --set validation.enabled=false --set global.fulfillmentTrust.enabled=false --set global.networking.networkClass.enabled=false"
 	cd ../osac-operator && ginkgo run --timeout 30m -v test/integration
 endif
@@ -559,7 +558,7 @@ ifeq ($(SUITE),bmf)
 	$(call kind-container-build,--build-arg GODEBUG=$(GODEBUG) -t localhost/bmf-operator:it -f ../bare-metal-fulfillment-operator/Containerfile ..)
 	$(call kind-load-image,localhost/bmf-operator:it)
 	kubectl apply --server-side --force-conflicts -f ../bare-metal-fulfillment-operator/test/crds/
-	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \
+	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) USE_LOCAL_OPERATOR=false \
 		EXTRA_HELM_ARGS="--set global.services.bmaas.enabled=true --set bmf.replicaCount=1 --set bmf.image.repository=localhost/bmf-operator --set bmf.image.tag=it --set bmf.image.pullPolicy=Never --set operator.enabled=false --set operator.networkManagers.enabled=true --set service.enabled=false --set hubAccess.enabled=false --set validation.enabled=false --set global.networking.networkClass.enabled=false"
 	cd ../bare-metal-fulfillment-operator && ginkgo run --timeout 30m -v test/integration
 endif

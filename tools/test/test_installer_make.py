@@ -171,6 +171,14 @@ class InstallerMakeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_local_operator_image_rejects_openshift(self):
+        """The target loads into Kind, so it refuses any other platform."""
+        result = self.make(
+            "local-operator-image", "PLATFORM=openshift", "PROFILE=dev", "NS=osac"
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("PLATFORM=kind", result.stderr)
+
     # -- Local operator image -------------------------------------------
 
     def test_tag_is_passed_to_helm_as_a_string(self):

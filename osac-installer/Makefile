@@ -107,6 +107,13 @@ ifneq ($(PLATFORM),kind)
 $(error USE_LOCAL_OPERATOR=true requires PLATFORM=kind (a remote cluster cannot pull a localhost image))
 endif
 endif
+# The target loads the image into a Kind cluster, so it is Kind-only even when
+# invoked directly with the flag at its default.
+ifneq ($(filter local-operator-image,$(MAKECMDGOALS)),)
+ifneq ($(PLATFORM),kind)
+$(error local-operator-image requires PLATFORM=kind (it loads the image into a Kind cluster))
+endif
+endif
 ifneq ($(filter install,$(MAKECMDGOALS)),)
 ifeq ($(DRY_RUN),1)
 ifneq ($(strip $(DRY_RUN_INVALID_HELM_FLAGS)),)

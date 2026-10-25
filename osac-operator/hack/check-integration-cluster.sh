@@ -23,8 +23,12 @@ esac
 if [[ -n ${OPENSHELL_SANDBOX:-} ]]; then
     [[ ${KUBECONFIG:-} == /sandbox/kube/config && -r ${KUBECONFIG:-} ]] ||
         fail 'KUBECONFIG must point to the mounted /sandbox/kube/config. See the Carbonite KiND integration guide.'
-elif [[ -n ${KUBECONFIG:-} && ! -r ${KUBECONFIG:-} ]]; then
-    fail 'KUBECONFIG is not readable.'
+elif [[ -n ${KUBECONFIG:-} ]]; then
+    # kubectl accepts a colon-separated list; require every entry to be readable.
+    IFS=: read -ra kubeconfigs <<< "$KUBECONFIG"
+    for path in "${kubeconfigs[@]}"; do
+        [[ -z $path || -r $path ]] || fail 'KUBECONFIG is not readable.'
+    done
 fi
 
 command -v kubectl >/dev/null 2>&1 || fail 'kubectl is unavailable.'

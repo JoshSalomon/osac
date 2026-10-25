@@ -14,7 +14,7 @@
 # scoped to one. The tools directory is captured with := because
 # MAKEFILE_LIST's last word is this file only while it is being parsed;
 # GOLANGCI_LINT_BIN expands lazily.
-GOLANGCI_LINT_TOOLS_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+GOLANGCI_LINT_TOOLS_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 GOLANGCI_LINT_BIN ?= $(GOLANGCI_LINT_TOOLS_DIR)/bin
 GOLANGCI_LINT = $(GOLANGCI_LINT_BIN)/golangci-lint
 GOLANGCI_LINT_VERSION ?= v2.13.2

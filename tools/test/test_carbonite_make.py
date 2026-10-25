@@ -798,6 +798,18 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertNotIn("not tested yet", result.stderr)
 
+    def test_rejects_a_wildcard_vertex_value(self):
+        for value in ("1%", "0%", "%", "1 0"):
+            with self.subTest(value=value):
+                result = self.make("enter-carb", succeeds=False, CARBONITE_VERTEX=value)
+                self.assertIn("CARBONITE_VERTEX must be 0 or 1", result.stderr)
+
+    def test_fix_carb_reports_a_missing_default_route(self):
+        self.install_fix_carb()
+        self.write_host_shim("ip", "import sys\nsys.exit(1)")
+        result = self.make("fix-carb", succeeds=False)
+        self.assertIn("Could not derive the host's current IPv4 address", result.stderr)
+
     def test_create_passes_the_vertex_environment(self):
         self.make("enter-carb", CARBONITE_VERTEX="1",
                   CARBONITE_VERTEX_PROJECT_ID="my-project")

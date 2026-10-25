@@ -123,5 +123,17 @@ class OperatorIntegrationPreflightTest(unittest.TestCase):
         self.assertIn("OPERATOR_PREFLIGHT_TIMEOUT:-300", SCRIPT.read_text())
 
 
+    def test_accepts_a_colon_separated_kubeconfig_list(self):
+        """kubectl accepts a list; every entry must be readable."""
+        second = self.root / "config2"
+        second.write_text("apiVersion: v1\nkind: Config\n")
+        result = self.run_preflight(KUBECONFIG=f"{self.config}:{second}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_a_list_with_an_unreadable_entry(self):
+        result = self.run_preflight(KUBECONFIG=f"{self.config}:/nonexistent")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("KUBECONFIG is not readable", result.stderr)
+
 if __name__ == "__main__":
     unittest.main()

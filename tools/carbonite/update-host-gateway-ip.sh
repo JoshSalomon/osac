@@ -40,7 +40,11 @@ done
 if [ "$#" -eq 1 ]; then
     address="$1"
 else
-    address="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i+1); exit } }')"
+    route=""
+    if ! route="$(ip -4 route get 1.1.1.1 2>/dev/null)"; then
+        route=""
+    fi
+    address="$(printf '%s\n' "$route" | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i+1); exit } }')"
 fi
 
 if [ -z "$address" ]; then

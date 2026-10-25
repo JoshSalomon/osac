@@ -29,7 +29,10 @@ CARBONITE_VERTEX_PROJECT_ID ?= $(ANTHROPIC_VERTEX_PROJECT_ID)
 CARBONITE_GCLOUD_ADC ?= $(HOME)/.config/gcloud/application_default_credentials.json
 export CARBONITE_VERTEX_PROJECT_ID
 export CARBONITE_VERTEX_REGION
-ifeq ($(filter $(CARBONITE_VERTEX),0 1),)
+ifneq ($(words $(CARBONITE_VERTEX)),1)
+$(error CARBONITE_VERTEX must be 0 or 1)
+endif
+ifneq ($(filter-out 0 1,$(CARBONITE_VERTEX)),)
 $(error CARBONITE_VERTEX must be 0 or 1)
 endif
 ifeq ($(CARBONITE_VERTEX),1)

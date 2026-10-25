@@ -2,6 +2,11 @@
 # Verify the actual image's tools and caches as its unprivileged runtime user.
 set -euo pipefail
 
+if [[ -n ${OPENSHELL_SANDBOX:-} ]]; then
+    echo 'Run this image test on the host, not inside an OpenShell sandbox: it starts a container.' >&2
+    exit 1
+fi
+
 container_cmd="${CONTAINER_CMD:-podman}"
 image="${1:-osac-dev-carbonite:latest}"
 

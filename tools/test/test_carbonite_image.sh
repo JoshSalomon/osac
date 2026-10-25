@@ -34,7 +34,7 @@ image="${1:-osac-dev-carbonite:latest}"
     test "$(pnpm --version)" = 9.15.9
     test "$(helm version --template "{{.Version}}")" = v3.22.0
     command -v codex >/dev/null
-    codex --version | grep -q '^codex-cli '
+    codex --version | grep -q "^codex-cli "
     command -v initdb >/dev/null
     command -v postgres >/dev/null
     python -c "import sys; assert sys.version_info[:2] == (3, 13), sys.version"
@@ -43,5 +43,5 @@ image="${1:-osac-dev-carbonite:latest}"
     ansible-galaxy --version >/dev/null
     test "$(pytest --version)" = "pytest 9.1.1"
     uv python find 3.13 --no-python-downloads >/dev/null
-    printf "Go and npm caches are writable by %s (UID %s); pnpm 9.15.9, Helm v3.22.0, Python 3.13, Ansible 11.5.0, and PostgreSQL server tools are installed.\n" "$(id -un)" "$(id -u)"
+    printf "Go and npm caches are writable by %s (UID %s); pnpm 9.15.9, Helm v3.22.0, Python 3.13, Ansible 11.5.0, Codex, and PostgreSQL server tools are installed.\n" "$(id -un)" "$(id -u)"
     '

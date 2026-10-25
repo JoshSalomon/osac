@@ -396,9 +396,11 @@ enforcing. Host file ownership is preserved.
 The gateway registration defaults to `openshell`; override `CARBONITE_GATEWAY`
 to select another local gateway.
 
-The policy defaults to `tools/carbonite/policy.yaml`, adapted from Carbonite
-for the OpenShell 0.1 policy schema. Its deployment-internal endpoints are
-reserved `.example` placeholders; set `CARBONITE_GITLAB_HOST`,
+The repository ships `tools/carbonite/policy.yaml`, adapted from Carbonite for
+the OpenShell 0.1 policy schema. The Makefile default is
+`$CARBONITE_STATE_DIR/policy-kind.yaml`, the host-only copy the KiND guide
+creates (see below). Its deployment-internal endpoints are reserved `.example`
+placeholders; set `CARBONITE_GITLAB_HOST`,
 `CARBONITE_JIRA_HOST` and `CARBONITE_PATTERNS_HOST` to substitute them at
 sandbox creation, and keep the substituted policy outside the repository. The
 [KiND integration guide](docs/guides/developer/carbonite-kind-integration.md)

@@ -1,9 +1,11 @@
 # Carbonite sandbox credentials (GitHub, Jira, Codex and Claude)
 
-The Carbonite sandbox never holds real tokens. OpenShell keeps them in the
-gateway as *providers*. The sandbox environment contains opaque placeholders
+The sandbox holds no GitHub, Jira or Codex token. OpenShell keeps those in the
+gateway as *providers*: the sandbox environment contains opaque placeholders
 (for example `openshell:resolve:env:...`), and the OpenShell proxy swaps in the
 real value on requests to the endpoints named in the provider's *profile*.
+Claude Code through Vertex AI is the one exception, described below: its Google
+refresh token is copied into the sandbox.
 Do not pass tokens with `CARBONITE_CREATE_ARGS='--env ...'`: that would put
 them in the sandbox specification.
 

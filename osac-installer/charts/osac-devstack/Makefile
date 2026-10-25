@@ -31,7 +31,12 @@ push-cli-tools: ## Push multi-arch CLI tools image
 ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 	@printf 'Carbonite push-cli-tools is unsupported by the host-build channel\n' >&2; exit 1
 else
-	podman manifest push --all $(CLI_TOOLS_IMAGE)
+	@if podman manifest exists $(CLI_TOOLS_IMAGE) >/dev/null 2>&1; then \
+		podman manifest push --all $(CLI_TOOLS_IMAGE); \
+	else \
+		printf 'No local manifest list for %s; pushing a single image.\n' "$(CLI_TOOLS_IMAGE)"; \
+		podman push $(CLI_TOOLS_IMAGE); \
+	fi
 endif
 
 .PHONY: build-push-cli-tools

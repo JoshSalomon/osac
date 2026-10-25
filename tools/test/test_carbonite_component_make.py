@@ -42,6 +42,22 @@ class ComponentImageTargetsTest(unittest.TestCase):
         kind_load.parent.mkdir(parents=True)
         shutil.copyfile(ROOT / "osac-installer/scripts/dev-full/kind-load-image.mk", kind_load)
 
+    def smart_podman(self, manifest_exists):
+        """A podman that answers `manifest exists` and records every call."""
+        bin_dir = self.root / ("bin-manifest" if manifest_exists else "bin-single")
+        bin_dir.mkdir(exist_ok=True)
+        script = bin_dir / "podman"
+        script.write_text(
+            '#!/bin/sh\n'
+            'printf "podman %s\\n" "$*" >> "$CALL_LOG"\n'
+            'if [ "$1" = manifest ] && [ "$2" = exists ]; then\n'
+            f'  exit {0 if manifest_exists else 1}\n'
+            'fi\n'
+            'exit 0\n'
+        )
+        script.chmod(0o755)
+        return f"{bin_dir}:{self.bin}:{os.environ['PATH']}"
+
     def helper(self):
         helper = self.root / "tools/carbonite/host-build"
         helper.parent.mkdir(parents=True)
@@ -131,11 +147,32 @@ class ComponentImageTargetsTest(unittest.TestCase):
         self.assertIn("unsupported", result.stderr)
         self.assertEqual([], self.calls())
 
+    def test_devstack_push_pushes_a_single_arch_image(self):
+        """A tag with no local manifest list is pushed as a plain image."""
+        result = self.make(self.devstack, "push-cli-tools",
+                           extra_env={"PATH": self.smart_podman(False)})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([
+            "podman manifest exists ghcr.io/osac-project/cli-tools:latest",
+            "podman push ghcr.io/osac-project/cli-tools:latest",
+        ], self.calls())
+
+    def test_devstack_push_pushes_a_manifest_list(self):
+        """A local manifest list is still pushed in full."""
+        result = self.make(self.devstack, "push-cli-tools",
+                           extra_env={"PATH": self.smart_podman(True)})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([
+            "podman manifest exists ghcr.io/osac-project/cli-tools:latest",
+            "podman manifest push --all ghcr.io/osac-project/cli-tools:latest",
+        ], self.calls())
+
     def test_devstack_host_build_and_push_retain_original_recipes(self):
         result = self.make(self.devstack, "build-push-cli-tools")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual([
             "podman build --platform linux/amd64,linux/arm64 --manifest ghcr.io/osac-project/cli-tools:latest -f Containerfile.cli-tools .",
+            "podman manifest exists ghcr.io/osac-project/cli-tools:latest",
             "podman manifest push --all ghcr.io/osac-project/cli-tools:latest",
         ], self.calls())
 

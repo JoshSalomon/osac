@@ -324,7 +324,15 @@ check-carb: ## Check host commands, engine, gateway and host-build binding
 	fi; \
 	printf 'Carbonite prerequisites OK: gateway "%s" is connected and authenticated.\n' "$(CARBONITE_GATEWAY)"; \
 	if [ "$(CARBONITE_VERTEX)" != 1 ]; then \
-		printf 'Warning: Claude Code in the sandbox is only supported through Vertex AI (CARBONITE_VERTEX=1). API-key authentication there is not tested yet, so Claude may ask for a sign-in.\n' >&2; \
+		if [ -t 2 ] && [ -z "$${NO_COLOR:-}" ] && [ "$${TERM:-}" != dumb ]; then \
+			printf '\033[1;33mWARNING:\033[0m Claude Code in the sandbox is only supported through Vertex AI.\n' >&2; \
+			printf '         Set CARBONITE_VERTEX=1 (and ANTHROPIC_VERTEX_PROJECT_ID) and rebuild;\n' >&2; \
+			printf '         API-key authentication inside the sandbox is not tested yet, so Claude may ask for a sign-in.\n' >&2; \
+		else \
+			printf 'WARNING: Claude Code in the sandbox is only supported through Vertex AI.\n' >&2; \
+			printf '         Set CARBONITE_VERTEX=1 (and ANTHROPIC_VERTEX_PROJECT_ID) and rebuild;\n' >&2; \
+			printf '         API-key authentication inside the sandbox is not tested yet, so Claude may ask for a sign-in.\n' >&2; \
+		fi; \
 	fi
 
 image: image-$(DEV_CONTAINER_SUFFIX) ## Build the selected development-container image

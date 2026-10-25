@@ -786,7 +786,11 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
     def test_check_warns_that_claude_api_keys_are_untested(self):
         result = self.make("check-carb")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("API-key authentication there is not tested yet", result.stderr)
+        self.assertIn("API-key authentication inside the sandbox is not tested yet",
+                      result.stderr)
+        self.assertIn("WARNING:", result.stderr)
+        # Not a terminal in tests: no escape sequences.
+        self.assertNotIn("\033[", result.stderr)
 
     def test_check_is_quiet_about_claude_with_vertex_enabled(self):
         result = self.make("check-carb", CARBONITE_VERTEX="1",

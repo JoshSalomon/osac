@@ -5,6 +5,10 @@
 #
 #   http://www.apache.org/licenses/LICENSE-2.0
 
+# Single definition of "inside an OpenShell sandbox" (tools/openshell.mk).
+OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+include $(OSAC_REPO_ROOT)/tools/openshell.mk
+
 GO_VERSION ?= $(shell grep '^go ' go.mod | cut -d' ' -f2)
 GOTOOLCHAIN ?= go$(GO_VERSION)
 GINKGO ?= go run github.com/onsi/ginkgo/v2/ginkgo
@@ -17,7 +21,6 @@ IMG_ECHO_ADAPTER ?= ghcr.io/osac-project/metering-echo-adapter:latest
 # Derive the repo root from this Makefile's location rather than git: the
 # Carbonite sandbox mounts the worktree without its host-only gitdir, so
 # `git rev-parse --show-toplevel` fails there and the include path collapses.
-OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
 
 include $(OSAC_REPO_ROOT)/tools/golangci-lint.mk
 
@@ -50,7 +53,7 @@ lint: golangci-lint
 # build-metering-{m360,echo}-adapter-image.yaml's `context: .`,
 # `file: osac-metering/adapters/Containerfile.*`).
 image-build-m360-adapter:
-ifneq ($(origin OPENSHELL_SANDBOX),undefined)
+ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 	@if [ "$(origin IMG_M360_ADAPTER)" != file ] || [ "$(origin CONTAINER_TOOL)" != file ]; then \
 		printf 'Carbonite image-build-m360-adapter does not support IMG_M360_ADAPTER or CONTAINER_TOOL overrides\n' >&2; \
 		exit 1; \
@@ -68,7 +71,7 @@ image-push-m360-adapter:
 	$(CONTAINER_TOOL) push $(IMG_M360_ADAPTER)
 
 image-build-echo-adapter:
-ifneq ($(origin OPENSHELL_SANDBOX),undefined)
+ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 	@if [ "$(origin IMG_ECHO_ADAPTER)" != file ] || [ "$(origin CONTAINER_TOOL)" != file ]; then \
 		printf 'Carbonite image-build-echo-adapter does not support IMG_ECHO_ADAPTER or CONTAINER_TOOL overrides\n' >&2; \
 		exit 1; \

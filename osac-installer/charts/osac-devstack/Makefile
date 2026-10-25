@@ -1,11 +1,15 @@
 # OSAC devstack chart Makefile
 
+# Single definition of "inside an OpenShell sandbox" (tools/openshell.mk).
+OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../../..)
+include $(OSAC_REPO_ROOT)/tools/openshell.mk
+
 CLI_TOOLS_IMAGE ?= ghcr.io/osac-project/cli-tools:latest
 
 .PHONY: build-cli-tools
 build-cli-tools: ## Build multi-arch CLI tools image for dev-full hooks
 
-ifneq ($(origin OPENSHELL_SANDBOX),undefined)
+ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 	@if [ "$(origin CLI_TOOLS_IMAGE)" != file ]; then \
 		printf 'Carbonite build-cli-tools does not support CLI_TOOLS_IMAGE overrides\n' >&2; \
 		exit 1; \
@@ -24,7 +28,7 @@ endif
 .PHONY: push-cli-tools
 push-cli-tools: ## Push multi-arch CLI tools image
 
-ifneq ($(origin OPENSHELL_SANDBOX),undefined)
+ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 	@printf 'Carbonite push-cli-tools is unsupported by the host-build channel\n' >&2; exit 1
 else
 	podman manifest push --all $(CLI_TOOLS_IMAGE)
@@ -32,7 +36,7 @@ endif
 
 .PHONY: build-push-cli-tools
 
-ifneq ($(origin OPENSHELL_SANDBOX),undefined)
+ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 build-push-cli-tools: ## Build and push CLI tools image
 	@printf 'Carbonite build-push-cli-tools is unsupported by the host-build channel\n' >&2; exit 1
 else

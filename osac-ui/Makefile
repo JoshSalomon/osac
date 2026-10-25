@@ -1,4 +1,8 @@
 # Image URL to use for building/pushing image targets
+# Single definition of "inside an OpenShell sandbox" (tools/openshell.mk).
+OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+include $(OSAC_REPO_ROOT)/tools/openshell.mk
+
 IMG ?= ghcr.io/osac-project/osac-ui:latest
 
 CONTAINER_TOOL ?= podman
@@ -8,7 +12,7 @@ CONTAINERFILE ?= Containerfile
 
 .PHONY: image-build
 image-build: ## Build the container image.
-ifneq ($(origin OPENSHELL_SANDBOX),undefined)
+ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 	@if [ "$(origin IMG)" != file ] || [ "$(origin CONTAINERFILE)" != file ] || [ "$(origin CONTAINER_TOOL)" != file ]; then \
 		printf 'Carbonite image-build does not support IMG, CONTAINERFILE, or CONTAINER_TOOL overrides\n' >&2; \
 		exit 1; \
@@ -37,6 +41,5 @@ kind-build-load-image: image-build ## Build the image and load it into the dev-f
 # Derive the repo root from this Makefile's location rather than git: the
 # Carbonite sandbox mounts the worktree without its host-only gitdir, so
 # `git rev-parse --show-toplevel` fails there and the include path collapses.
-OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 
 include $(OSAC_REPO_ROOT)/osac-installer/scripts/dev-full/kind-load-image.mk

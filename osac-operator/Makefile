@@ -1,3 +1,7 @@
+# Single definition of "inside an OpenShell sandbox" (tools/openshell.mk).
+OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+include $(OSAC_REPO_ROOT)/tools/openshell.mk
+
 OSAC_DEV_NAMESPACE ?= osac-operator-dev
 
 # Image URL to use all building/pushing image targets
@@ -13,7 +17,7 @@ GOTOOLCHAIN ?= go$(GO_VERSION)
 GOTOOLCHAIN_AUTO ?= $(GOTOOLCHAIN)+auto
 
 # OpenShell mediates signals to owned PIDs but rejects envtest's process-group signals.
-ifdef OPENSHELL_SANDBOX
+ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 ENVTEST_GO_TEST := bash hack/go-test-openshell.sh
 else
 ENVTEST_GO_TEST := go test
@@ -166,7 +170,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 .PHONY: image-build
 image-build: ## Build container image with manager and console-proxy.
 
-ifneq ($(origin OPENSHELL_SANDBOX),undefined)
+ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 	@if [ "$(origin IMG)" != file ] || [ "$(origin CONTAINERFILE)" != file ] || [ "$(origin CONTAINER_TOOL)" != file ]; then \
 		printf 'Carbonite image-build does not support IMG, CONTAINERFILE, or CONTAINER_TOOL overrides\n' >&2; \
 		exit 1; \
@@ -265,7 +269,6 @@ ENVTEST_VERSION ?= release-0.19
 # Derive the repo root from this Makefile's location rather than git: the
 # Carbonite sandbox mounts the worktree without its host-only gitdir, so
 # `git rev-parse --show-toplevel` fails there and the include path collapses.
-OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 
 include $(OSAC_REPO_ROOT)/tools/golangci-lint.mk
 include $(OSAC_REPO_ROOT)/osac-installer/scripts/dev-full/kind-load-image.mk

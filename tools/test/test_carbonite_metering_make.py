@@ -36,6 +36,7 @@ class MeteringImageDispatchTest(unittest.TestCase):
         shared = self.root / "tools"
         shared.mkdir()
         shutil.copyfile(REPO / "tools/golangci-lint.mk", shared / "golangci-lint.mk")
+        shutil.copyfile(REPO / "tools/openshell.mk", self.root / "tools/openshell.mk")
         kind_load = self.root / "osac-installer/scripts/dev-full/kind-load-image.mk"
         kind_load.parent.mkdir(parents=True)
         shutil.copyfile(REPO / "osac-installer/scripts/dev-full/kind-load-image.mk", kind_load)

@@ -31,6 +31,7 @@ class ComponentImageTargetsTest(unittest.TestCase):
         git.chmod(0o755)
         (self.root / "tools").mkdir()
         (self.root / "tools/golangci-lint.mk").write_text("")
+        shutil.copyfile(ROOT / "tools/openshell.mk", self.root / "tools/openshell.mk")
         self.operator = self.root / "osac-operator"
         self.devstack = self.root / "osac-installer/charts/osac-devstack"
         self.operator.mkdir()

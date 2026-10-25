@@ -5,6 +5,10 @@
 #
 #   http://www.apache.org/licenses/LICENSE-2.0
 
+# Single definition of "inside an OpenShell sandbox" (tools/openshell.mk).
+OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+include $(OSAC_REPO_ROOT)/tools/openshell.mk
+
 BINARY_NAME ?= metering-service
 IMG ?= ghcr.io/osac-project/metering-service:latest
 CONTAINER_TOOL ?= podman
@@ -15,7 +19,6 @@ GINKGO ?= go run github.com/onsi/ginkgo/v2/ginkgo
 # Derive the repo root from this Makefile's location rather than git: the
 # Carbonite sandbox mounts the worktree without its host-only gitdir, so
 # `git rev-parse --show-toplevel` fails there and the include path collapses.
-OSAC_REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
 
 include $(OSAC_REPO_ROOT)/tools/golangci-lint.mk
 
@@ -41,7 +44,7 @@ generate:
 # latter reachable only from the repo root). Matches
 # build-metering-service-image.yaml's `context: .`.
 image-build:
-ifneq ($(origin OPENSHELL_SANDBOX),undefined)
+ifeq ($(OPENSHELL_SANDBOX_ACTIVE),true)
 	@if [ "$(origin IMG)" != file ] || [ "$(origin CONTAINER_TOOL)" != file ]; then \
 		printf 'Carbonite image-build does not support IMG or CONTAINER_TOOL overrides\n' >&2; \
 		exit 1; \

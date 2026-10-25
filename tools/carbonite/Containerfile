@@ -33,6 +33,7 @@ ARG GINKGO_VERSION=2.23.4
 ARG ANSIBLE_VERSION=11.5.0
 ARG ANSIBLE_CORE_VERSION=2.18.5
 ARG PYTEST_VERSION=9.1.1
+ARG CODEX_VERSION=0.164.0
 
 # 3. Verified Binary Downloads
 RUN set -e \
@@ -86,7 +87,7 @@ RUN uv venv --python /usr/bin/python3.13 /opt/osac-python \
     && uv pip install --no-cache --python /opt/osac-python/bin/python \
        "ansible==${ANSIBLE_VERSION}" "ansible-core==${ANSIBLE_CORE_VERSION}" \
        "pytest==${PYTEST_VERSION}" \
-    && npm install -g @anthropic-ai/claude-code pnpm@9.15.9
+    && npm install -g @anthropic-ai/claude-code "@openai/codex@${CODEX_VERSION}" pnpm@9.15.9
 
 ENV PATH="/opt/osac-python/bin:/usr/local/go/bin:${PATH}"
 

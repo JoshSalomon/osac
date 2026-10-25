@@ -28,6 +28,8 @@ image="${1:-osac-dev-carbonite:latest}"
     ! command -v kind >/dev/null
     test "$(pnpm --version)" = 9.15.9
     test "$(helm version --template "{{.Version}}")" = v3.22.0
+    command -v codex >/dev/null
+    codex --version | grep -q '^codex-cli '
     command -v initdb >/dev/null
     command -v postgres >/dev/null
     python -c "import sys; assert sys.version_info[:2] == (3, 13), sys.version"

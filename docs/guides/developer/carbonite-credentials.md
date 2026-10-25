@@ -1,4 +1,4 @@
-# Carbonite sandbox credentials (GitHub and Jira)
+# Carbonite sandbox credentials (GitHub, Jira and Codex)
 
 The Carbonite sandbox never holds real tokens. OpenShell keeps them in the
 gateway as *providers*. The sandbox environment contains opaque placeholders
@@ -88,6 +88,25 @@ open a new shell inside it (credentials only reach new processes):
 $G sandbox provider attach --wait osac-carbonite-kind osac-github
 $G sandbox provider attach --wait osac-carbonite-kind osac-jira
 ```
+
+## Codex
+
+Codex ships in the image (`@openai/codex`, pinned by the `CODEX_VERSION` build
+arg). Authenticate with an API key. Device-code sign-in is **not permitted** by
+the OpenAI enterprise licence:
+
+```bash
+read -rs OPENAI_API_KEY; export OPENAI_API_KEY
+printenv OPENAI_API_KEY | codex login --with-api-key
+codex login status
+unset OPENAI_API_KEY
+```
+
+Do not run a bare `codex login` (ChatGPT sign-in) or `codex login
+--device-auth`. Credentials are written to `~/.codex/auth.json` inside the
+sandbox, which is not one of the mounted volumes, so repeat the login after
+`make rebuild-carb`. Wiring Codex to an OpenShell provider, as GitHub and Jira
+are, would remove that step.
 
 ## Troubleshooting
 

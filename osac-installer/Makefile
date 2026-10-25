@@ -287,12 +287,16 @@ KIND_RUNTIME_ENV := KIND_PROFILE=$(PROFILE) \
 	$(if $(KIND_RUNTIME_PROVIDER),KIND_EXPERIMENTAL_PROVIDER=$(KIND_RUNTIME_PROVIDER))
 KIND_RUNTIME_CMD := $(KIND_RUNTIME_ENV) $(KIND_RUNTIME)
 KIND_CLUSTER_NAME ?= osac-dev
-# The cluster name becomes a container name and appears unquoted in kind
-# commands, so accept only a plain name.
+# The cluster name appears unquoted in kind commands and becomes part of the
+# node hostname <name>-control-plane, so it must follow hostname rules: dot-
+# separated labels of lowercase letters, digits and dashes, each starting with
+# a letter or digit. Inner labels also end with one; the last label may end in
+# a dash because kind appends "-control-plane", and must stay within 49
+# characters so that suffix keeps it under the 63-character label limit.
 export KIND_CLUSTER_NAME
-KIND_CLUSTER_NAME_VALID := $(shell printf '%s' "$$KIND_CLUSTER_NAME" | grep -Eqx '[a-z0-9][a-z0-9.-]*' && [ "$$(printf '%s' "$$KIND_CLUSTER_NAME" | wc -l)" -eq 0 ] && [ $${#KIND_CLUSTER_NAME} -le 63 ] && echo yes || echo no)
+KIND_CLUSTER_NAME_VALID := $(shell printf '%s' "$$KIND_CLUSTER_NAME" | grep -Eqx '([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.])*[a-z0-9][a-z0-9-]{0,48}' && [ "$$(printf '%s' "$$KIND_CLUSTER_NAME" | wc -l)" -eq 0 ] && [ $${#KIND_CLUSTER_NAME} -le 63 ] && echo yes || echo no)
 ifneq ($(KIND_CLUSTER_NAME_VALID),yes)
-$(error KIND_CLUSTER_NAME must be a lowercase cluster name, using only lowercase letters, digits, dot or dash)
+$(error KIND_CLUSTER_NAME must be a lowercase hostname-style name: dot-separated labels of lowercase letters, digits and dashes, with the last label at most 49 characters)
 endif
 KIND_CONFIG := kind-config.yaml
 ifeq ($(PROFILE),dev-full)

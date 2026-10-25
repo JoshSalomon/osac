@@ -46,9 +46,14 @@ class InstallerMakeTest(unittest.TestCase):
     def make(self, target, *args, **env):
         """Run make with -n so recipes are printed, never executed."""
         base = {k: v for k, v in os.environ.items() if k not in IGNORED_ENV}
+        # Pin what the Makefile would otherwise detect from the host: the
+        # container tool (podman/docker/neither) and Apple Silicon, which
+        # switches Kind commands to a different runtime path.
+        defaults = {"CONTAINER_TOOL": "podman"}
         return subprocess.run(
-            [shutil.which("make"), "-C", str(INSTALLER), "-n", target, *args],
-            env={**base, **env},
+            [shutil.which("make"), "-C", str(INSTALLER), "-n", target,
+             "HOST_IS_MAC_ARM=", *args],
+            env={**base, **defaults, **env},
             capture_output=True,
             text=True,
             timeout=120,
@@ -78,7 +83,7 @@ class InstallerMakeTest(unittest.TestCase):
 
     def test_accepts_a_plain_tool_name_and_an_absolute_path(self):
         """A bare name and an absolute path are both accepted."""
-        for tool in ("podman", "docker", "/usr/bin/podman"):
+        for tool in ("podman", "docker", "/bin/sh"):
             with self.subTest(tool=tool):
                 result = self.install(CONTAINER_TOOL=tool)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -172,7 +177,11 @@ class InstallerMakeTest(unittest.TestCase):
         """Kind accepts only lowercase names; reject the rest and shell syntax."""
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "pwned"
-            for name in (f"x; touch {marker} #", "x y", "x/y", "X", "x_y"):
+            for name in (
+                f"x; touch {marker} #", "x y", "x/y", "X", "x_y",
+                "osac..dev", ".osac", "osac.", "a.-b", "a-.b", "-osac",
+                "a" * 50, "a." + "b" * 50,
+            ):
                 with self.subTest(name=name):
                     result = self.make(
                         "install-infra", *BASE_ARGS, KIND_CLUSTER_NAME=name
@@ -183,7 +192,7 @@ class InstallerMakeTest(unittest.TestCase):
 
     def test_accepts_a_plain_cluster_name_and_profile(self):
         """Lowercase cluster names and a known profile pass."""
-        for name in ("osac-dev", "osac.dev"):
+        for name in ("osac-dev", "osac.dev", "osac-", "a" * 49, "a" * 12 + "." + "b" * 49):
             with self.subTest(name=name):
                 result = self.make(
                     "install-infra", *BASE_ARGS, KIND_CLUSTER_NAME=name
@@ -231,6 +240,15 @@ class InstallerMakeTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("PLATFORM=kind", result.stderr)
+
+    def test_results_do_not_depend_on_the_host_container_tool(self):
+        """Provider assertions hold whatever tool the host would detect."""
+        for host_tool in ("docker", "podman"):
+            with self.subTest(host_tool=host_tool):
+                with mock.patch.dict(os.environ, {"CONTAINER_TOOL": host_tool}):
+                    result = self.make("install-infra", *BASE_ARGS)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("KIND_EXPERIMENTAL_PROVIDER=podman kind get nodes", result.stdout)
 
     # -- Local operator image -------------------------------------------
 

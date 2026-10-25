@@ -22,18 +22,19 @@ RUN dnf install -y \
     && dnf clean all
 
 # 2. Binary Toolchain Versions (pinned to osac-project baseline)
-ARG GO_VERSION=1.24.4
+ARG GO_VERSION=1.26.3
 ARG BUF_VERSION=1.50.0
 ARG KUBECTL_VERSION=1.33.1
 ARG HELM_VERSION=3.22.0
 ARG HELM_SHA256=1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
 ARG JIRA_VERSION=1.7.0
 ARG GRPCURL_VERSION=1.9.3
-ARG GINKGO_VERSION=2.23.4
+ARG GINKGO_VERSION=2.33.1
 ARG ANSIBLE_VERSION=11.5.0
 ARG ANSIBLE_CORE_VERSION=2.18.5
 ARG PYTEST_VERSION=9.1.1
 ARG CODEX_VERSION=0.164.0
+ARG CLAUDE_CODE_VERSION=2.1.310
 
 # 3. Verified Binary Downloads
 RUN set -e \
@@ -87,7 +88,7 @@ RUN uv venv --python /usr/bin/python3.13 /opt/osac-python \
     && uv pip install --no-cache --python /opt/osac-python/bin/python \
        "ansible==${ANSIBLE_VERSION}" "ansible-core==${ANSIBLE_CORE_VERSION}" \
        "pytest==${PYTEST_VERSION}" \
-    && npm install -g @anthropic-ai/claude-code "@openai/codex@${CODEX_VERSION}" pnpm@9.15.9
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" pnpm@9.15.9
 
 ENV PATH="/opt/osac-python/bin:/usr/local/go/bin:${PATH}"
 

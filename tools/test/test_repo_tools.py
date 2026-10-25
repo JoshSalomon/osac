@@ -26,5 +26,31 @@ class RepoToolsTest(unittest.TestCase):
         self.assertEqual(binary.group(1).strip(), "$(GOLANGCI_LINT_TOOLS_DIR)/bin")
 
 
+    def containerfile_arg(self, name):
+        match = re.search(rf"^ARG {name}=(\S+)$",
+                          (ROOT / "tools/carbonite/Containerfile").read_text(), re.M)
+        self.assertIsNotNone(match, name)
+        return match.group(1)
+
+    def test_containerfile_go_version_matches_the_workspace(self):
+        workspace = re.search(r"^go (\S+)$", (ROOT / "go.work").read_text(), re.M)
+        self.assertIsNotNone(workspace)
+        self.assertEqual(self.containerfile_arg("GO_VERSION"), workspace.group(1))
+
+    def test_containerfile_ginkgo_matches_the_modules(self):
+        module = re.search(r"github\.com/onsi/ginkgo/v2 (v\S+)",
+                           (ROOT / "osac-operator/go.mod").read_text())
+        self.assertIsNotNone(module)
+        self.assertEqual("v" + self.containerfile_arg("GINKGO_VERSION"), module.group(1))
+
+    def test_claude_code_version_is_pinned(self):
+        self.assertRegex(self.containerfile_arg("CLAUDE_CODE_VERSION"), r"^\d+\.\d+\.\d+$")
+        text = (ROOT / "tools/carbonite/Containerfile").read_text()
+        self.assertIn("@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}", text)
+
+    def test_envtest_wrapper_writes_no_files_to_the_checkout(self):
+        text = (ROOT / "osac-operator/hack/go-test-openshell.sh").read_text()
+        self.assertNotIn('--tmpdir="$PWD"', text)
+
 if __name__ == "__main__":
     unittest.main()

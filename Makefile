@@ -12,7 +12,7 @@ CARBONITE_GATEWAY ?= openshell
 CARBONITE_POLICY ?= $(CARBONITE_STATE_DIR)/policy-kind.yaml
 CARBONITE_WORKDIR ?= /sandbox/osac
 CARBONITE_VOLUME ?= $(CARBONITE_NAME)-workspace
-CARBONITE_KUBECONFIG_VOLUME = $(CARBONITE_NAME)-kubeconfig
+CARBONITE_KUBECONFIG_VOLUME ?= $(CARBONITE_NAME)-kubeconfig
 CARBONITE_WORKSPACE ?= osac-kind
 CARBONITE_CREATE_ARGS ?=
 CARBONITE_KUBECONFIG_DIR ?= $(CARBONITE_STATE_DIR)/kube
@@ -100,7 +100,7 @@ page_token=; \
 while :; do \
 	sandboxes="$$( $(CARBONITE_RUN) sandbox list --output json --page-size 1000 --page-token "$$page_token" )"; \
 	phase="$$(printf '%s\n' "$$sandboxes" | jq -er --arg name "$(CARBONITE_NAME)" \
-		'.sandboxes | map(select(.name == $$name)) | if length == 0 then "Absent" else .[0].phase end')"; \
+		'(.sandboxes // []) | map(select(.name == $$name)) | if length == 0 then "Absent" else .[0].phase end')"; \
 	[ "$$phase" = Absent ] || break; \
 	page_token="$$(printf '%s\n' "$$sandboxes" | jq -r '.next_page_token // ""')"; \
 	[ -n "$$page_token" ] || break; \
@@ -256,7 +256,7 @@ case "$$phase" in \
 				'.Options.device == $$source and .Options.type == "none" and .Options.o == "bind" and \
 				 .Labels["openshell.ai/sandbox-attachable"] == "true" and \
 				 .Labels["openshell.ai/sandbox-attachable-workspace"] == $$workspace' >/dev/null; then \
-				printf 'Kubeconfig volume has a different source or approval labels; inspect it before retrying.\n' >&2; \
+				printf 'Kubeconfig volume %s has a different source or approval labels; set CARBONITE_KUBECONFIG_VOLUME to a new name.\n' "$(CARBONITE_KUBECONFIG_VOLUME)" >&2; \
 				exit 1; \
 			fi; \
 		fi; \
@@ -326,6 +326,9 @@ check-carb: ## Check host commands, engine, gateway and host-build binding
 		exit 1; \
 	fi; \
 	printf 'Carbonite prerequisites OK: gateway "%s" is connected and authenticated.\n' "$(CARBONITE_GATEWAY)"; \
+	if [ "$(CARBONITE_WORKDIR)" != /sandbox/osac ]; then \
+		printf 'Note: CARBONITE_WORKDIR differs from /sandbox/osac; the policy paths for setup-envtest and the AAP venv assume the default workdir. Adjust the policy for a custom workdir.\n' >&2; \
+	fi; \
 	if [ "$(CARBONITE_VERTEX)" != 1 ]; then \
 		if [ -t 2 ] && [ -z "$${NO_COLOR:-}" ] && [ "$${TERM:-}" != dumb ]; then \
 			printf '\033[1;33mWARNING:\033[0m Claude Code in the sandbox is only supported through Vertex AI.\n' >&2; \

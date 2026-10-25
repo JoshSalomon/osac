@@ -106,7 +106,16 @@ def refresh() -> float:
 if __name__ == "__main__":
     try:
         hours = refresh()
-    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError):
-        print("Could not renew the scoped kubeconfig; check host KiND access and setup.", file=sys.stderr)
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or "").strip()
+        print("Could not renew the scoped kubeconfig: " + str(error), file=sys.stderr)
+        if detail:
+            print("kubectl: " + detail, file=sys.stderr)
+        else:
+            print("Check host KiND access and setup.", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print("Could not renew the scoped kubeconfig: " + str(error), file=sys.stderr)
+        print("Check host KiND access and setup.", file=sys.stderr)
         sys.exit(1)
     print(f"Scoped kubeconfig renewed; token lifetime granted: {hours:.1f} hours.")

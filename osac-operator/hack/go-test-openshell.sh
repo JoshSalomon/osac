@@ -19,7 +19,7 @@ if [[ ! -f "$patch_source" ]]; then
 fi
 
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/osac-envtest-XXXXXX")
-mod_file=$(mktemp --tmpdir="$PWD" --suffix=.mod .envtest-openshell-XXXXXXXX)
+mod_file=$(mktemp --tmpdir="$temp_dir" --suffix=.mod .envtest-openshell-XXXXXXXX)
 trap 'rm -rf "$temp_dir"; rm -f "$mod_file" "${mod_file%.mod}.sum"' EXIT
 
 cp -a "$source_dir" "$temp_dir/controller-runtime"

@@ -122,5 +122,15 @@ class RefreshKindKubeconfigTest(unittest.TestCase):
         self.assertFalse((self.root / "kubectl-args").exists())
 
 
+    def test_renewal_failure_reports_the_kubectl_diagnostic(self):
+        """A denied token request must surface kubectl's reason, never stdout."""
+        self.command("kubectl", '#!/bin/sh\n'
+                     'echo "forbidden: User \\"sandbox-test\\" cannot create resource" >&2\n'
+                     'exit 1\n')
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden", result.stderr)
+        self.assertNotIn(self.new_token, result.stdout + result.stderr)
+
 if __name__ == "__main__":
     unittest.main()

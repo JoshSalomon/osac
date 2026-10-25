@@ -59,6 +59,9 @@ state = json.loads(state_path.read_text())
 def option(key):
     return options[options.index(key) + 1]
 if command == "list":
+    if os.environ.get("OSAC_CARB_BARE_LIST"):
+        print("{}")
+        sys.exit(0)
     assert "--limit" not in options
     assert option("--page-size") == "1000"
     if os.environ.get("OSAC_CARB_FAIL_LIST"):
@@ -797,6 +800,27 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
                            CARBONITE_VERTEX_PROJECT_ID="my-project")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertNotIn("not tested yet", result.stderr)
+
+    def test_state_probe_treats_a_missing_sandbox_list_as_absent(self):
+        result = self.make("status-carb", OSAC_CARB_BARE_LIST="1")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("(not created)", result.stdout)
+
+    def test_kubeconfig_volume_name_can_come_from_the_environment(self):
+        self.make("enter-carb", CARBONITE_KUBECONFIG_VOLUME="my-kubeconfig")
+        creates = [call for call in self.calls()
+                   if call[0] == "engine" and call[1:3] == ["volume", "create"]]
+        self.assertTrue(any("my-kubeconfig" in call for call in creates), creates)
+
+    def test_check_notes_the_policy_coupling_of_a_custom_workdir(self):
+        result = self.make("check-carb", CARBONITE_WORKDIR="/sandbox/project")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("CARBONITE_WORKDIR", result.stderr)
+        self.assertIn("/sandbox/osac", result.stderr)
+
+    def test_check_does_not_warn_for_the_default_workdir(self):
+        result = self.make("check-carb")
+        self.assertNotIn("CARBONITE_WORKDIR differs", result.stderr)
 
     def test_rejects_a_wildcard_vertex_value(self):
         for value in ("1%", "0%", "%", "1 0"):

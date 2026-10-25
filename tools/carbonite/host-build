@@ -7,14 +7,18 @@ if (($# != 1)); then
     exit 2
 fi
 
+# sandbox creation sets PROJECT_DIR from CARBONITE_WORKDIR; default for older
+# sandboxes.
+project_dir="${PROJECT_DIR:-/sandbox/osac}"
+project_dir="${project_dir%/}"
 case "$1" in
     probe) expected_dir= ;;
-    ui) expected_dir=/sandbox/osac/osac-ui ;;
-    fulfillment) expected_dir=/sandbox/osac/fulfillment-service ;;
-    operator) expected_dir=/sandbox/osac/osac-operator ;;
-    metering-service) expected_dir=/sandbox/osac/osac-metering/metering-service ;;
-    metering-m360|metering-echo) expected_dir=/sandbox/osac/osac-metering/adapters ;;
-    devstack-cli-tools) expected_dir=/sandbox/osac/osac-installer/charts/osac-devstack ;;
+    ui) expected_dir="$project_dir/osac-ui" ;;
+    fulfillment) expected_dir="$project_dir/fulfillment-service" ;;
+    operator) expected_dir="$project_dir/osac-operator" ;;
+    metering-service) expected_dir="$project_dir/osac-metering/metering-service" ;;
+    metering-m360|metering-echo) expected_dir="$project_dir/osac-metering/adapters" ;;
+    devstack-cli-tools) expected_dir="$project_dir/osac-installer/charts/osac-devstack" ;;
     *) echo 'unsupported host-build action' >&2; exit 2 ;;
 esac
 

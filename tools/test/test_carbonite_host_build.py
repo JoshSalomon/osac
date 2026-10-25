@@ -63,6 +63,17 @@ class DispatcherTests(unittest.TestCase):
                 self.assertNotEqual(0, result.returncode)
                 self.assertIn("unsupported", result.stderr)
 
+    def test_sandbox_helper_honors_project_dir(self):
+        """The checkout root comes from PROJECT_DIR, not a hardcoded path."""
+        with tempfile.TemporaryDirectory() as temp:
+            base = pathlib.Path(temp)
+            (base / "osac-ui").mkdir()
+            env = {**os.environ, "PROJECT_DIR": str(base)}
+            result = subprocess.run([str(HELPER), "ui"], cwd=base / "osac-ui",
+                                    env=env, text=True, capture_output=True)
+        self.assertNotIn("unsupported worktree", result.stderr)
+        self.assertIn("host build is not enabled", result.stderr)
+
     def test_sandbox_helper_rejects_other_checkout_before_ssh(self):
         for action in ("ui", "fulfillment", "operator", "metering-service", "metering-m360",
                        "metering-echo", "devstack-cli-tools"):
@@ -425,6 +436,45 @@ class ManagerTests(unittest.TestCase):
                                 "--workspace", "default", "--sandbox", "osac-carbonite",
                                 "--checkout", str(self.checkout)]), message)
         self.assertIn("carbonite-host-build.md", message)
+
+    def test_bound_rejects_authorization_without_the_forced_command(self):
+        """A hand-repaired line without the forced command must not pass."""
+        paths = self.manager._paths(self.home)
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+             mock.patch.object(self.manager, "_gateway", return_value="https://127.0.0.1:17670"), \
+             mock.patch.object(self.manager, "_host_key", return_value="osac-host-build ssh-ed25519 AAAAhost\n"), \
+             mock.patch.object(self.manager, "_run", side_effect=self._fake_keygen):
+            self.manager.enable(paths, "openshell", "default", "osac-carbonite", self.checkout)
+            line = next(text for text in paths["authorized"].read_text().splitlines()
+                        if "osac-host-build" in text)
+            fields = line.split()
+            paths["authorized"].write_text(f"ssh-ed25519 {fields[-2]} {fields[-1]}\n")
+            with self.assertRaises(ValueError) as raised:
+                self.manager._bound(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        self.assertIn("forced command", str(raised.exception))
+
+    def test_bound_reports_not_enabled_after_revoke(self):
+        """Revoke removes the config; status must say so, not raise ENOENT."""
+        paths = self.manager._paths(self.home)
+        paths["libexec"].mkdir(parents=True)
+        with self.assertRaises(ValueError) as raised:
+            self.manager._bound(paths, "openshell", "default", "osac-carbonite", self.checkout)
+        message = str(raised.exception)
+        self.assertIn("not enabled", message)
+        self.assertNotIn("No such file", message)
+
+    def test_gateway_tolerates_a_null_gateway_list(self):
+        result = subprocess.CompletedProcess([], 0, stdout='{"gateways": null}')
+        with mock.patch.object(self.manager, "_run", return_value=result):
+            with self.assertRaises(ValueError) as raised:
+                self.manager._gateway("openshell")
+        self.assertIn("not found", str(raised.exception))
+
+    def test_sandbox_policy_tolerates_a_null_policy(self):
+        result = subprocess.CompletedProcess(
+            [], 0, stdout='{"name": "sb", "workspace": "ws", "policy": null}')
+        with mock.patch.object(self.manager, "_run", return_value=result):
+            self.assertFalse(self.manager._sandbox_policy("g", "ws", "sb"))
 
     def test_bound_reports_stale_authorized_key_with_recovery_command(self):
         paths = self.manager._paths(self.home)
@@ -837,7 +887,8 @@ class ManagerTests(unittest.TestCase):
                 self.manager.prepare(paths, "openshell", "default", "osac-carbonite", self.checkout)
         notice = stderr.getvalue()
         self.assertIn("removed the host-build key authorization", notice)
-        self.assertNotIn("fix-carb-network", notice)
+        self.assertNotIn("make fix-carb", notice)
+        self.assertNotIn("network change", notice)
 
     def test_prepare_probe_retries_unexpected_response(self):
         paths = self.manager._paths(self.home)

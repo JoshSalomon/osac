@@ -166,6 +166,11 @@ def _require_authorized(paths, data):
     if marked[0].split()[-2] != expected:
         raise ValueError("the host-build key authorization in " + str(authorized)
                          + " does not match the installed host-build key\n" + hint)
+    forced = 'restrict,command="/usr/bin/python3 -I -S ' + str(paths["dispatcher"]) + '" '
+    if not marked[0].startswith(forced):
+        raise ValueError("the host-build key authorization in " + str(authorized)
+                         + " lacks the forced command; the sandbox key would allow a full host shell\n"
+                         + hint)
 
 
 def _paths(home):
@@ -194,10 +199,10 @@ def _run(argv, *, capture=False):
 
 def _gateway(gateway):
     result = _run(["/usr/bin/openshell", "gateway", "list", "--output", "json"], capture=True)
-    values = json.loads(result.stdout)
+    values = json.loads(result.stdout) or {}
     if isinstance(values, dict):
         values = values.get("gateways", values.get("items", []))
-    matches = [item for item in values if item.get("name") == gateway]
+    matches = [item for item in (values or []) if item.get("name") == gateway]
     if len(matches) != 1:
         raise ValueError("selected gateway was not found")
     item = matches[0]
@@ -246,6 +251,8 @@ def _lock(paths):
 
 
 def _config(paths):
+    if not paths["config"].exists():
+        raise ValueError("host build is not enabled (no installed configuration); run the enable command")
     _require_regular(paths["config"])
     return json.loads(paths["config"].read_text())
 
@@ -457,7 +464,7 @@ def _probe_with_retries(gateway, workspace, sandbox, ssh):
 
 def _sandbox_matches(gateway, workspace, sandbox):
     result = _run(_openshell_args(gateway, workspace, "sandbox", "get", sandbox, "--output", "json"), capture=True)
-    item = json.loads(result.stdout)
+    item = json.loads(result.stdout) or {}
     if item.get("name") != sandbox or item.get("workspace") != workspace or item.get("phase") != "Ready":
         raise ValueError("sandbox identity or readiness changed")
     identity = item.get("id")
@@ -472,10 +479,10 @@ def _sandbox_matches(gateway, workspace, sandbox):
 
 def _sandbox_policy(gateway, workspace, sandbox):
     result = _run(_openshell_args(gateway, workspace, "sandbox", "get", sandbox, "--output", "json"), capture=True)
-    info = json.loads(result.stdout)
+    info = json.loads(result.stdout) or {}
     if info.get("name") != sandbox or info.get("workspace") != workspace:
         raise ValueError("sandbox identity changed during cleanup")
-    rules = info.get("policy", {}).get("network_policies", {})
+    rules = (info.get("policy") or {}).get("network_policies") or {}
     return any(rule.get("name") == RULE for rule in rules.values())
 
 

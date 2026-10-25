@@ -387,8 +387,7 @@ toolchain.
 The user mapping makes the image's sandbox user (UID/GID 1000) the host checkout
 owner, so it can read and write the project without changing host ownership.
 Resource admission stays enabled: the targets label the project volume for
-`CARBONITE_WORKSPACE`
-(default `default`) before attaching it. `CARBONITE_VOLUME` defaults to
+`CARBONITE_WORKSPACE` (default `osac-kind`) before attaching it. `CARBONITE_VOLUME` defaults to
 `$(CARBONITE_NAME)-workspace`; use a distinct name for a different checkout.
 An existing volume with a different host path or approval labels is rejected.
 Before creation, a temporary container applies Podman's shared `:z` SELinux
@@ -429,22 +428,19 @@ The envtest rule allows `setup-envtest*` under `/sandbox/osac/*/bin` to fetch it
 release index and Kubernetes test binaries from GitHub. Adjust that path if you
 customize `CARBONITE_WORKDIR`.
 
-With OpenShell 0.1.2 and controller-runtime 0.24.1, envtest teardown currently
-fails with `operation not permitted`: envtest signals a process group, which
-OpenShell rejects. The operator's 972 controller specs pass after explicitly
-setting the test API server's advertised address to loopback, but the teardown
-failure still makes `make test` / `make` fail. Dependency-download rules do not
-resolve this process-control compatibility limit.
+Under OpenShell, envtest teardown fails with `operation not permitted`: it
+signals a process group, which OpenShell rejects. When `OPENSHELL_SANDBOX` is
+set, the operator's `make test` therefore runs through
+`osac-operator/hack/go-test-openshell.sh`. The wrapper reads the
+controller-runtime version from `go.mod`, patches that module's signal call in
+a throwaway copy so each test-owned process is signalled by its positive PID,
+and runs the suite. The operator's controller specs pass this way, from the
+host and in Carbonite.
 
-For productization after the PoC, a proposed workaround is to adapt envtest's
-cleanup to signal each test-owned process by its positive PID: send SIGTERM,
-wait for exit, then use SIGKILL if necessary. This requires a supported cleanup
-adapter or a maintained controller-runtime dependency patch; a Makefile cleanup
-trap alone removes leftovers but does not prevent the existing `AfterSuite`
-failure. A trap can provide fallback cleanup for interrupted runs. Keep cleanup
-scoped to that run's processes, preserve test failures, and report cleanup
-failures. Individual-child signaling was verified; this envtest workaround is
-not implemented or validated yet, and requires no broader sandbox permissions.
+The patch is temporary. The wrapper fails with a drift message when the patched
+source cannot be found, so a controller-runtime upgrade cannot silently
+reintroduce the teardown failure; remove the wrapper once envtest gains
+per-process cleanup.
 
 For `osac-ui`, the Carbonite image includes pnpm 9.15.9 and a writable npm
 cache for source development. Inside the sandbox, `pnpm install --frozen-lockfile`

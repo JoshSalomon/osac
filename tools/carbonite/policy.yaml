@@ -77,8 +77,17 @@ network_policies:
         protocol: rest
         enforcement: enforce
         access: full
+      - host: platform.claude.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
     binaries:
       - path: /usr/bin/curl
+      # Claude Code installed from npm: /usr/local/bin/claude resolves to the
+      # packaged native binary.
+      - path: /usr/local/bin/claude
+      - path: /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
       - path: /sandbox/.local/bin/claude
       - path: /sandbox/.local/bin/opencode
       - path: /sandbox/.local/bin/claude-bin
@@ -119,7 +128,7 @@ network_policies:
       # A standalone install by the sandbox user is also accepted.
       - path: /sandbox/.local/bin/codex
       - path: /sandbox/.local/bin/codex-bin
-      - path: /sandbox/.codex/packages/standalone/releases/*/bin/codex
+      - path: /sandbox/.codex/packages/*/releases/*/bin/*
       - path: /sandbox/.local/bin/opencode
       - path: /sandbox/.opencode/bin/opencode-bin
 

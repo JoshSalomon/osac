@@ -92,21 +92,26 @@ $G sandbox provider attach --wait osac-carbonite-kind osac-jira
 ## Codex
 
 Codex ships in the image (`@openai/codex`, pinned by the `CODEX_VERSION` build
-arg). Authenticate with an API key. Device-code sign-in is **not permitted** by
-the OpenAI enterprise licence:
+arg) and reads `OPENAI_API_KEY` from the environment, so it uses an OpenShell
+provider exactly like GitHub and Jira. The sandbox holds only a placeholder and
+the proxy substitutes the real key on requests to `api.openai.com`; no login
+step and no key in the sandbox.
 
 ```bash
+$G profile import -f tools/carbonite/providers/osac-openai.yaml
+
 read -rs OPENAI_API_KEY; export OPENAI_API_KEY
-printenv OPENAI_API_KEY | codex login --with-api-key
-codex login status
+$G provider create --name osac-openai --type osac-openai \
+  --credential OPENAI_API_KEY
 unset OPENAI_API_KEY
+
+export CARBONITE_PROVIDERS="osac-github osac-jira osac-openai"
 ```
 
-Do not run a bare `codex login` (ChatGPT sign-in) or `codex login
---device-auth`. Credentials are written to `~/.codex/auth.json` inside the
-sandbox, which is not one of the mounted volumes, so repeat the login after
-`make rebuild-carb`. Wiring Codex to an OpenShell provider, as GitHub and Jira
-are, would remove that step.
+Existing sandboxes: `$G sandbox provider attach --wait osac-carbonite-kind
+osac-openai`, then open a new shell. Do not run `codex login` or `codex login
+--device-auth`: device-code sign-in is not permitted by the OpenAI enterprise
+licence, and the provider supplies the key.
 
 ## Troubleshooting
 
@@ -120,6 +125,11 @@ are, would remove that step.
   Remove the endpoint from the profile or give the policy rule a `protocol`.
 - **Jira `permission denied` on connect:** the policy does not allow the host
   or the binary. `$G logs osac-carbonite-kind` shows the denied connection.
+- **An agent CLI cannot connect (`ECONNREFUSED`, "Unable to connect"):** a
+  denial, not a network fault. `$G logs osac-carbonite-kind` names the kernel
+  path of the binary that was refused; add that exact path to the rule. A
+  global npm install execs a packaged native binary (for Claude Code,
+  `.../@anthropic-ai/claude-code/bin/claude.exe`), not the launcher on PATH.
 - **Jira 401 with the provider attached:** check the stored token has no
   literal quote characters and is an unscoped token. Compare a request made
   with `curl -u "<email>:<token>"` on the host with one made from the sandbox.

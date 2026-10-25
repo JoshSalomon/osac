@@ -33,6 +33,8 @@ image="${1:-osac-dev-carbonite:latest}"
     ! command -v kind >/dev/null
     test "$(pnpm --version)" = 9.15.9
     test "$(helm version --template "{{.Version}}")" = v3.22.0
+    command -v claude >/dev/null
+    claude --version | grep -q "Claude Code"
     command -v codex >/dev/null
     codex --version | grep -q "^codex-cli "
     command -v initdb >/dev/null
@@ -43,5 +45,5 @@ image="${1:-osac-dev-carbonite:latest}"
     ansible-galaxy --version >/dev/null
     test "$(pytest --version)" = "pytest 9.1.1"
     uv python find 3.13 --no-python-downloads >/dev/null
-    printf "Go and npm caches are writable by %s (UID %s); pnpm 9.15.9, Helm v3.22.0, Python 3.13, Ansible 11.5.0, Codex, and PostgreSQL server tools are installed.\n" "$(id -un)" "$(id -u)"
+    printf "Go and npm caches are writable by %s (UID %s); pnpm 9.15.9, Helm v3.22.0, Python 3.13, Ansible 11.5.0, Claude Code, Codex, and PostgreSQL server tools are installed.\n" "$(id -un)" "$(id -u)"
     '

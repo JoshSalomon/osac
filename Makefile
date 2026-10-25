@@ -322,7 +322,10 @@ check-carb: ## Check host commands, engine, gateway and host-build binding
 			"$(CARBONITE_GATEWAY)" "$(OPENSHELL_CMD)" "$(CARBONITE_GATEWAY)" "$(OPENSHELL_CMD)" "$(CARBONITE_GATEWAY)" >&2; \
 		exit 1; \
 	fi; \
-	printf 'Carbonite prerequisites OK: gateway "%s" is connected and authenticated.\n' "$(CARBONITE_GATEWAY)"
+	printf 'Carbonite prerequisites OK: gateway "%s" is connected and authenticated.\n' "$(CARBONITE_GATEWAY)"; \
+	if [ "$(CARBONITE_VERTEX)" != 1 ]; then \
+		printf 'Warning: Claude Code in the sandbox is only supported through Vertex AI (CARBONITE_VERTEX=1). API-key authentication there is not tested yet, so Claude may ask for a sign-in.\n' >&2; \
+	fi
 
 image: image-$(DEV_CONTAINER_SUFFIX) ## Build the selected development-container image
 

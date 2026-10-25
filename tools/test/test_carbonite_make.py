@@ -783,6 +783,17 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
         adc.write_text(text)
         return adc
 
+    def test_check_warns_that_claude_api_keys_are_untested(self):
+        result = self.make("check-carb")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("API-key authentication there is not tested yet", result.stderr)
+
+    def test_check_is_quiet_about_claude_with_vertex_enabled(self):
+        result = self.make("check-carb", CARBONITE_VERTEX="1",
+                           CARBONITE_VERTEX_PROJECT_ID="my-project")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("not tested yet", result.stderr)
+
     def test_create_passes_the_vertex_environment(self):
         self.make("enter-carb", CARBONITE_VERTEX="1",
                   CARBONITE_VERTEX_PROJECT_ID="my-project")

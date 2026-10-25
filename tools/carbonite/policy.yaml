@@ -182,6 +182,8 @@ network_policies:
       - path: /usr/bin/node
       - path: /usr/local/bin/node
       - path: /usr/bin/python3
+      - path: /usr/local/bin/claude
+      - path: /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
 
   google_oauth:
     name: google-oauth-passthrough
@@ -199,6 +201,8 @@ network_policies:
       - path: /usr/bin/curl
       - path: /usr/bin/node
       - path: /usr/local/bin/node
+      - path: /usr/local/bin/claude
+      - path: /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
 
   google_accounts:
     name: google-accounts-passthrough
@@ -215,6 +219,8 @@ network_policies:
       - path: /sandbox/.local/share/claude/versions/*
       - path: /usr/bin/node
       - path: /usr/local/bin/node
+      - path: /usr/local/bin/claude
+      - path: /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
 
   gitlab:
     name: gitlab

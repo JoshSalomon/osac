@@ -777,6 +777,47 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
         self.assertNotIn("create", self.operations())
 
 
+    def write_gcloud_adc(self, text='{"type": "authorized_user", "refresh_token": "rt"}'):
+        adc = self.home / ".config/gcloud/application_default_credentials.json"
+        adc.parent.mkdir(parents=True, exist_ok=True)
+        adc.write_text(text)
+        return adc
+
+    def test_create_passes_the_vertex_environment(self):
+        self.make("enter-carb", CARBONITE_VERTEX="1",
+                  CARBONITE_VERTEX_PROJECT_ID="my-project")
+        create = next(call for call in self.calls()
+                      if call[0] == "openshell" and call[6] == "create")
+        self.assertIn("CLAUDE_CODE_USE_VERTEX=1", create)
+        self.assertIn("CLOUD_ML_REGION=global", create)
+        self.assertIn("ANTHROPIC_VERTEX_PROJECT_ID=my-project", create)
+
+    def test_vertex_requires_a_project_id(self):
+        result = self.make("enter-carb", succeeds=False, CARBONITE_VERTEX="1")
+        self.assertIn("CARBONITE_VERTEX_PROJECT_ID", result.stderr)
+        self.assertNotIn("create", self.operations())
+
+    def test_vertex_copies_the_gcloud_credentials_once_ready(self):
+        adc = self.write_gcloud_adc()
+        self.make("enter-carb", CARBONITE_VERTEX="1",
+                  CARBONITE_VERTEX_PROJECT_ID="my-project")
+        self.assertIn([
+            "openshell", "--gateway", "openshell", "--workspace", "osac-kind",
+            "sandbox", "upload", "osac-carbonite-kind", str(adc),
+            "/sandbox/.config/gcloud/application_default_credentials.json",
+            "--no-git-ignore",
+        ], self.calls())
+        operations = self.operations()
+        self.assertLess(operations.index("create"), operations.index("upload"))
+
+    def test_create_without_vertex_sets_no_vertex_environment(self):
+        self.write_gcloud_adc()
+        self.make("enter-carb")
+        create = next(call for call in self.calls()
+                      if call[0] == "openshell" and call[6] == "create")
+        self.assertFalse(any("CLAUDE_CODE_USE_VERTEX" in arg for arg in create))
+        self.assertEqual(self.uploads(), [])
+
     def test_create_attaches_each_listed_provider(self):
         self.make("enter-carb", CARBONITE_PROVIDERS="osac-github osac-jira")
 

@@ -20,6 +20,26 @@ export CARBONITE_KUBECONFIG_DIR
 # Space-separated OpenShell provider names attached to every created sandbox.
 CARBONITE_PROVIDERS ?=
 export CARBONITE_PROVIDERS
+# Claude Code through Google Vertex AI, the only credential path supported for
+# now. The host's gcloud application-default credentials are copied into the
+# sandbox once per creation, so the sandbox holds a live refresh token.
+CARBONITE_VERTEX ?= 0
+CARBONITE_VERTEX_REGION ?= global
+CARBONITE_VERTEX_PROJECT_ID ?= $(ANTHROPIC_VERTEX_PROJECT_ID)
+CARBONITE_GCLOUD_ADC ?= $(HOME)/.config/gcloud/application_default_credentials.json
+export CARBONITE_VERTEX_PROJECT_ID
+export CARBONITE_VERTEX_REGION
+ifeq ($(filter $(CARBONITE_VERTEX),0 1),)
+$(error CARBONITE_VERTEX must be 0 or 1)
+endif
+ifeq ($(CARBONITE_VERTEX),1)
+ifneq ($(shell printf '%s' "$$CARBONITE_VERTEX_PROJECT_ID" | grep -Eqx '[A-Za-z0-9:._-]+' && echo ok),ok)
+$(error CARBONITE_VERTEX=1 requires CARBONITE_VERTEX_PROJECT_ID (or ANTHROPIC_VERTEX_PROJECT_ID) as a plain Google project id)
+endif
+ifneq ($(shell printf '%s' "$$CARBONITE_VERTEX_REGION" | grep -Eqx '[a-z0-9-]+' && echo ok),ok)
+$(error CARBONITE_VERTEX_REGION must be a plain region name)
+endif
+endif
 # Host jira-cli config copied into each created sandbox; it holds no credential
 # (the token arrives through the jira provider).
 CARBONITE_JIRA_CONFIG ?= $(if $(JIRA_CONFIG_FILE),$(JIRA_CONFIG_FILE),$(HOME)/.config/.jira/.config.yml)
@@ -182,6 +202,14 @@ case "$$phase" in \
 		else \
 			jira_config=""; \
 		fi; \
+		adc_file=""; \
+		if [ "$(CARBONITE_VERTEX)" = 1 ]; then \
+			adc_file="$(CARBONITE_GCLOUD_ADC)"; \
+			if [ ! -f "$$adc_file" ] || ! grep -q '"refresh_token"' "$$adc_file"; then \
+				adc_file=""; \
+				printf 'Warning: no usable gcloud application-default credentials at %s; Claude will ask for another sign-in.\n' "$(CARBONITE_GCLOUD_ADC)" >&2; \
+			fi; \
+		fi; \
 		kube_dir="$${CARBONITE_KUBECONFIG_DIR:-}"; \
 		if [ -n "$$kube_dir" ]; then \
 			case "$$kube_dir" in /*) ;; *) printf 'CARBONITE_KUBECONFIG_DIR must be an absolute path.\n' >&2; exit 1 ;; esac; \
@@ -237,6 +265,9 @@ case "$$phase" in \
 			'{podman: {mounts: ([{type: "volume", source: $$source, target: $$target, read_only: false}] + \
 				(if $$kube_dir == "" then [] else [{type: "volume", source: $$kube_volume, target: "/sandbox/kube", read_only: true}] end))}}')"; \
 		if [ -n "$$kube_dir" ]; then set -- --env 'KUBECONFIG=/sandbox/kube/config'; else set --; fi; \
+		if [ "$(CARBONITE_VERTEX)" = 1 ]; then \
+			set -- "$$@" --env CLAUDE_CODE_USE_VERTEX=1 --env CLOUD_ML_REGION=$(CARBONITE_VERTEX_REGION) --env ANTHROPIC_VERTEX_PROJECT_ID=$(CARBONITE_VERTEX_PROJECT_ID); \
+		fi; \
 		for provider in $$providers; do set -- "$$@" --provider "$$provider"; done; \
 		$(CARBONITE_RUN) sandbox create --name "$(CARBONITE_NAME)" \
 			--from "$(CARBONITE_IMAGE_REF)" --policy "$$policy_file" \
@@ -253,6 +284,19 @@ case "$$phase" in \
 				printf 'Copied the host jira config into the sandbox.\n'; \
 			else \
 				printf 'Warning: could not copy the jira config into the sandbox; run jira init there.\n' >&2; \
+			fi; \
+		fi; \
+		if [ -n "$$adc_file" ]; then \
+			for attempt in $$(seq 1 60); do \
+				$(carbonite_state) \
+				[ "$$phase" != Ready ] || break; \
+				sleep 1; \
+			done; \
+			if [ "$$phase" = Ready ] && $(CARBONITE_RUN) sandbox upload "$(CARBONITE_NAME)" "$$adc_file" \
+				/sandbox/.config/gcloud/application_default_credentials.json --no-git-ignore; then \
+				printf 'Copied the host gcloud application-default credentials into the sandbox.\n'; \
+			else \
+				printf 'Warning: could not copy the gcloud credentials; run gcloud auth application-default login in the sandbox.\n' >&2; \
 			fi; \
 		fi ;; \
 	*) printf 'Sandbox %s is %s; inspect it with make status-carb.\n' "$(CARBONITE_NAME)" "$$phase" >&2; exit 1 ;; \

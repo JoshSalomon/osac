@@ -1,4 +1,4 @@
-# Carbonite sandbox credentials (GitHub, Jira and Codex)
+# Carbonite sandbox credentials (GitHub, Jira, Codex and Claude)
 
 The Carbonite sandbox never holds real tokens. OpenShell keeps them in the
 gateway as *providers*. The sandbox environment contains opaque placeholders
@@ -112,6 +112,45 @@ Existing sandboxes: `$G sandbox provider attach --wait osac-carbonite-kind
 osac-openai`, then open a new shell. Do not run `codex login` or `codex login
 --device-auth`: device-code sign-in is not permitted by the OpenAI enterprise
 licence, and the provider supplies the key.
+
+## Claude Code (Vertex AI)
+
+For now Claude Code authenticates **only** through Google Vertex AI. The two
+non-secret settings are passed to the sandbox at creation, and the host's gcloud
+application-default credentials are copied in once, so no per-sandbox login is
+needed.
+
+On the host, once:
+
+```bash
+gcloud auth application-default login   # ~/.config/gcloud/application_default_credentials.json
+```
+
+At sandbox creation:
+
+```bash
+export ANTHROPIC_VERTEX_PROJECT_ID=<project>
+export CARBONITE_VERTEX=1                 # 0 by default
+# CLOUD_ML_REGION defaults to global; override with CARBONITE_VERTEX_REGION
+make rebuild-carb
+```
+
+Creation passes `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION` and
+`ANTHROPIC_VERTEX_PROJECT_ID`, then uploads the credentials file to
+`~/.config/gcloud/application_default_credentials.json` in the sandbox once it
+is ready. If the file is missing or has no `refresh_token`, creation warns and
+Claude asks for a sign-in. `CARBONITE_GCLOUD_ADC` points at another file.
+
+Two properties to keep in mind:
+
+- The sandbox holds a live Google refresh token, readable by anything inside it,
+  agents included. Prefer a dedicated account or project for sandbox use, and
+  treat the token as exposed once a sandbox has run.
+- `ANTHROPIC_VERTEX_PROJECT_ID` is passed as a sandbox environment variable, so
+  it appears in the sandbox specification as well as the process environment.
+
+API-key authentication for Claude is not supported in the sandbox yet; it is
+planned. Do not use the interactive `claude` sign-in or any device-code flow.
 
 ## Troubleshooting
 

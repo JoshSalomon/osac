@@ -413,7 +413,8 @@ use OpenShell providers, set up once and attached to every new sandbox with
 `CARBONITE_PROVIDERS`; see the
 [credentials guide](docs/guides/developer/carbonite-credentials.md). Codex is
 installed too and authenticates with an API key (device sign-in is not
-permitted); the same guide covers it. The targets use the tools
+permitted), and Claude Code can use Google Vertex AI; the same guide covers
+both. The targets use the tools
 installed in the image; Carbonite's host-side credential import and plugin setup
 are separate launcher features.
 

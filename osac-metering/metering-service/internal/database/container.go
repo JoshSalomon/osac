@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -136,10 +137,7 @@ func (c *Container) Start(ctx context.Context) error {
 		return fmt.Errorf("creating template database: %w", err)
 	}
 
-	templateURL := fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		containerUser, c.userPassword, c.host, c.port, templateDB,
-	)
+	templateURL := c.dsn(containerUser, c.userPassword, templateDB, "")
 	templatePool, err := pgxpool.New(ctx, templateURL)
 	if err != nil {
 		return fmt.Errorf("creating template database pool: %w", err)
@@ -186,17 +184,11 @@ func (c *Container) startLocal(ctx context.Context) (resultErr error) {
 		return fmt.Errorf("removing local PostgreSQL password file: %w", err)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return fmt.Errorf("selecting local PostgreSQL port: %w", err)
-	}
-	c.host, c.port, err = net.SplitHostPort(listener.Addr().String())
-	_ = listener.Close()
-	if err != nil {
-		return fmt.Errorf("parsing local PostgreSQL port: %w", err)
-	}
-	c.runCmd = exec.Command(c.tool, "-D", dataDir, "-h", c.host, "-p", c.port,
-		"-c", "unix_socket_directories="+dataDir, "-c", "fsync=off")
+	// Local mode listens only on a Unix socket inside the data directory.
+	// Allocating a TCP port would race with every other test package between
+	// closing the probe listener and PostgreSQL binding the port.
+	c.runCmd = exec.Command(c.tool, "-D", dataDir,
+		"-c", "listen_addresses=", "-c", "unix_socket_directories="+dataDir, "-c", "fsync=off")
 	c.runCmd.Stdout = os.Stdout
 	c.runCmd.Stderr = os.Stderr
 	if err := c.runCmd.Start(); err != nil {
@@ -289,10 +281,7 @@ func (i *Instance) init(ctx context.Context) error {
 	i.name = fmt.Sprintf("metering_test%d", i.container.count)
 	i.container.lock.Unlock()
 
-	i.url = fmt.Sprintf(
-		"postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		containerUser, i.container.userPassword, i.container.host, i.container.port, i.name,
-	)
+	i.url = i.container.dsn(containerUser, i.container.userPassword, i.name, "")
 
 	_, err := i.container.adminConn.Exec(ctx,
 		fmt.Sprintf("CREATE DATABASE %s TEMPLATE metering_template OWNER %s",
@@ -364,15 +353,24 @@ func (c *Container) waitForPort(ctx context.Context) error {
 	}
 }
 
+// dsn builds a connection URL for this server. The sandbox-local server has no
+// TCP port and is reached through the Unix socket in its data directory.
+func (c *Container) dsn(user, password, database, extra string) string {
+	if c.local {
+		socketDir := filepath.Join(c.dataDir, "data")
+		return fmt.Sprintf("postgres://%s:%s@/%s?host=%s&sslmode=disable%s",
+			user, password, database, url.QueryEscape(socketDir), extra)
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable%s",
+		user, password, c.host, c.port, database, extra)
+}
+
 func (c *Container) waitForConnection(ctx context.Context) error {
 	deadline := time.After(30 * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
-	adminURL := fmt.Sprintf(
-		"postgres://postgres:%s@%s:%s/postgres?sslmode=disable&connect_timeout=1",
-		c.adminPassword, c.host, c.port,
-	)
+	adminURL := c.dsn("postgres", c.adminPassword, "postgres", "&connect_timeout=1")
 
 	for {
 		select {

@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,13 +21,34 @@ INSTALLER = ROOT / "osac-installer"
 
 BASE_ARGS = ["PLATFORM=kind", "PROFILE=dev", "NS=osac"]
 
+# Installer settings are inputs to the code under test, never ambient state:
+# a developer with, say, CONTAINER_TOOL=docker or OPERATOR_IMAGE_TAG=it
+# exported must still get the behavior each test asserts.
+IGNORED_ENV = {
+    "AAP_LICENSE_FILE",
+    "CONTAINER_TOOL",
+    "EXTRA_HELM_ARGS",
+    "GODEBUG",
+    "KIND_CLUSTER_NAME",
+    "KIND_EXPERIMENTAL_PROVIDER",
+    "MAKEFLAGS",
+    "MAKELEVEL",
+    "MFLAGS",
+    "NS",
+    "OPERATOR_IMAGE_TAG",
+    "PLATFORM",
+    "PROFILE",
+    "USE_LOCAL_OPERATOR",
+}
+
 
 class InstallerMakeTest(unittest.TestCase):
     def make(self, target, *args, **env):
         """Run make with -n so recipes are printed, never executed."""
+        base = {k: v for k, v in os.environ.items() if k not in IGNORED_ENV}
         return subprocess.run(
             [shutil.which("make"), "-C", str(INSTALLER), "-n", target, *args],
-            env={**os.environ, **env},
+            env={**base, **env},
             capture_output=True,
             text=True,
             timeout=120,
@@ -146,11 +168,11 @@ class InstallerMakeTest(unittest.TestCase):
             self.assertIn("PROFILE", result.stderr)
             self.assertFalse(marker.exists())
 
-    def test_rejects_shell_syntax_in_the_cluster_name(self):
-        """The kind cluster name reaches shell recipes; reject shell syntax."""
+    def test_rejects_invalid_kind_cluster_names(self):
+        """Kind accepts only lowercase names; reject the rest and shell syntax."""
         with tempfile.TemporaryDirectory() as temp:
             marker = Path(temp) / "pwned"
-            for name in (f"x; touch {marker} #", "x y", "x/y"):
+            for name in (f"x; touch {marker} #", "x y", "x/y", "X", "x_y"):
                 with self.subTest(name=name):
                     result = self.make(
                         "install-infra", *BASE_ARGS, KIND_CLUSTER_NAME=name
@@ -160,11 +182,13 @@ class InstallerMakeTest(unittest.TestCase):
                     self.assertFalse(marker.exists())
 
     def test_accepts_a_plain_cluster_name_and_profile(self):
-        """The default-looking cluster name and a known profile pass."""
-        result = self.make(
-            "install-infra", *BASE_ARGS, KIND_CLUSTER_NAME="osac-dev"
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        """Lowercase cluster names and a known profile pass."""
+        for name in ("osac-dev", "osac.dev"):
+            with self.subTest(name=name):
+                result = self.make(
+                    "install-infra", *BASE_ARGS, KIND_CLUSTER_NAME=name
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
         result = self.make(
             "local-operator-image", "PROFILE=dev-full", "NS=osac",
             "PLATFORM=kind",
@@ -175,6 +199,35 @@ class InstallerMakeTest(unittest.TestCase):
         """The target loads into Kind, so it refuses any other platform."""
         result = self.make(
             "local-operator-image", "PLATFORM=openshift", "PROFILE=dev", "NS=osac"
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("PLATFORM=kind", result.stderr)
+
+    def test_ignores_installer_settings_from_the_parent_environment(self):
+        """A developer's exported settings must not change the assertions."""
+        with mock.patch.dict(os.environ, {
+            "OPERATOR_IMAGE_TAG": "it",
+            "CONTAINER_TOOL": "docker",
+            "NS": "bad;x",
+        }):
+            first = self.local_image()
+            self.assertEqual(first.returncode, 0, first.stderr)
+            time.sleep(1.1)
+            second = self.local_image()
+            self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertNotEqual(self.helm_tag(first.stdout), self.helm_tag(second.stdout))
+
+    def test_dry_run_requires_the_shared_arguments(self):
+        """install-dry-run goes through the same PLATFORM/PROFILE/NS gate."""
+        result = self.make("install-dry-run")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("PLATFORM", result.stderr)
+
+    def test_dry_run_rejects_openshift_with_the_local_operator(self):
+        """Rendering a local image for OpenShift is unsupported and refused."""
+        result = self.make(
+            "install-dry-run", "PLATFORM=openshift", "PROFILE=dev", "NS=osac",
+            "USE_LOCAL_OPERATOR=true",
         )
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("PLATFORM=kind", result.stderr)

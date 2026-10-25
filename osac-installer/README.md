@@ -175,11 +175,12 @@ make install-osac PLATFORM=kind PROFILE=dev NS=osac USE_LOCAL_OPERATOR=true
 ```
 
 The flag's `--set` values are applied after `EXTRA_HELM_ARGS`, so it wins over
-an `EXTRA_HELM_ARGS` image override. Each build gets a tag unique to that
-invocation, so a rebuilt image always changes the Deployment and rolls the
-operator pod instead of leaving the previous one running; set
-`OPERATOR_IMAGE_TAG` to choose a tag yourself. It is rejected for
-`PLATFORM=openshift`, where a localhost image cannot be pulled.
+an `EXTRA_HELM_ARGS` image override. By default each build gets a tag unique to
+that invocation, so a rebuilt image always changes the Deployment and rolls the
+operator pod instead of leaving the previous one running. If you set
+`OPERATOR_IMAGE_TAG` yourself, use a new tag for each rebuild: reusing a tag
+leaves the Deployment unchanged, so the previous pod keeps running. The flag is
+rejected for `PLATFORM=openshift`, where a localhost image cannot be pulled.
 
 To preview the full Kind install and enable the CSI driver without making cluster
 changes:

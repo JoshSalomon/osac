@@ -76,7 +76,7 @@ GODEBUG ?= http2client=0
 # -- Fail-fast parameter validation ------------------------------------
 # Guards fire at parse time, gated by MAKECMDGOALS so `make help` works.
 
-ALL_TARGETS := install uninstall install-infra uninstall-infra install-osac uninstall-osac install-devstack kind-load-images local-operator-image test
+ALL_TARGETS := install uninstall install-infra uninstall-infra install-osac uninstall-osac install-devstack install-dry-run kind-load-images local-operator-image test
 
 ifneq ($(filter $(ALL_TARGETS),$(MAKECMDGOALS)),)
 ifndef PLATFORM
@@ -290,9 +290,9 @@ KIND_CLUSTER_NAME ?= osac-dev
 # The cluster name becomes a container name and appears unquoted in kind
 # commands, so accept only a plain name.
 export KIND_CLUSTER_NAME
-KIND_CLUSTER_NAME_VALID := $(shell printf '%s' "$$KIND_CLUSTER_NAME" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9_.-]*' && [ "$$(printf '%s' "$$KIND_CLUSTER_NAME" | wc -l)" -eq 0 ] && [ $${#KIND_CLUSTER_NAME} -le 63 ] && echo yes || echo no)
+KIND_CLUSTER_NAME_VALID := $(shell printf '%s' "$$KIND_CLUSTER_NAME" | grep -Eqx '[a-z0-9][a-z0-9.-]*' && [ "$$(printf '%s' "$$KIND_CLUSTER_NAME" | wc -l)" -eq 0 ] && [ $${#KIND_CLUSTER_NAME} -le 63 ] && echo yes || echo no)
 ifneq ($(KIND_CLUSTER_NAME_VALID),yes)
-$(error KIND_CLUSTER_NAME must be a plain cluster name, using only letters, digits, dot, dash or underscore)
+$(error KIND_CLUSTER_NAME must be a lowercase cluster name, using only lowercase letters, digits, dot or dash)
 endif
 KIND_CONFIG := kind-config.yaml
 ifeq ($(PROFILE),dev-full)

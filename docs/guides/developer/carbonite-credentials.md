@@ -125,6 +125,14 @@ licence, and the provider supplies the key.
   Remove the endpoint from the profile or give the policy rule a `protocol`.
 - **Jira `permission denied` on connect:** the policy does not allow the host
   or the binary. `$G logs osac-carbonite-kind` shows the denied connection.
+- **Codex returns 401 with a real-looking key:** a stored login from an earlier
+  `codex login` takes precedence over the provider placeholder. Run
+  `codex logout` in the sandbox, open a new shell, and check that
+  `OPENAI_API_KEY` starts with `openshell:resolve`.
+- **A provider update seems to have no effect:** compare
+  `$G provider get <name>` resource version before and after the update; it must
+  increase. The bare `--credential KEY` form reads the value from your shell, so
+  an unset or stale variable updates nothing useful.
 - **An agent CLI cannot connect (`ECONNREFUSED`, "Unable to connect"):** a
   denial, not a network fault. `$G logs osac-carbonite-kind` names the kernel
   path of the binary that was refused; add that exact path to the rule. A

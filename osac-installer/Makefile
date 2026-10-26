@@ -132,8 +132,14 @@ ifneq ($(PLATFORM),kind)
 $(error local-operator-image requires PLATFORM=kind (it loads the image into a Kind cluster))
 endif
 endif
-ifneq ($(filter install,$(MAKECMDGOALS)),)
-ifeq ($(DRY_RUN),1)
+# install-dry-run is itself a dry run, so the same checks apply to it even
+# though DRY_RUN defaults to 0 for a direct invocation.
+DRY_RUN_TARGET := $(filter install-dry-run,$(MAKECMDGOALS))
+ifneq ($(filter install,$(MAKECMDGOALS))$(DRY_RUN_TARGET),)
+ifneq ($(filter-out 0 1,$(DRY_RUN)),)
+$(error DRY_RUN must be 0 or 1)
+endif
+ifneq ($(filter 1,$(DRY_RUN))$(DRY_RUN_TARGET),)
 ifneq ($(strip $(DRY_RUN_INVALID_HELM_FLAGS)),)
 $(error DRY_RUN=1 only accepts --set/--set-string overrides in EXTRA_HELM_ARGS; unsupported: $(DRY_RUN_INVALID_HELM_FLAGS))
 endif
@@ -145,8 +151,6 @@ ifeq ($(strip $(DRY_RUN_OCP_VERSION)),)
 $(error DRY_RUN_OCP_VERSION is required for PLATFORM=openshift DRY_RUN=1 (major.minor, e.g. 4.20))
 endif
 endif
-else ifneq ($(DRY_RUN),0)
-$(error DRY_RUN must be 0 or 1)
 endif
 endif
 endif
@@ -314,9 +318,9 @@ CONTAINER_TOOL ?= $(or $(shell command -v podman 2>/dev/null),$(shell command -v
 # reaches the shell through the environment; it is never spliced into shell
 # text.
 export CONTAINER_TOOL
-CONTAINER_TOOL_VALID := $(shell [ -n "$$CONTAINER_TOOL" ] && printf '%s' "$$CONTAINER_TOOL" | grep -Eqx '[A-Za-z0-9_-]+|/[A-Za-z0-9_./-]+' && [ "$$(printf '%s' "$$CONTAINER_TOOL" | wc -l)" -eq 0 ] && echo yes || echo no)
+CONTAINER_TOOL_VALID := $(shell [ -n "$$CONTAINER_TOOL" ] && printf '%s' "$$CONTAINER_TOOL" | grep -Eqx '(docker|podman)|(/[A-Za-z0-9_.-]+)*/(docker|podman)' && [ "$$(printf '%s' "$$CONTAINER_TOOL" | wc -l)" -eq 0 ] && echo yes || echo no)
 ifneq ($(CONTAINER_TOOL_VALID),yes)
-$(error CONTAINER_TOOL must be an executable name or an absolute path, using only letters, digits, dot, dash, underscore or slash)
+$(error CONTAINER_TOOL must be docker or podman, either bare or as an absolute path)
 endif
 # kind defaults to the Docker provider. On Apple Silicon, honor an explicitly
 # selected container tool when the Kind provider has not been set separately;

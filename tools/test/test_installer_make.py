@@ -83,7 +83,7 @@ class InstallerMakeTest(unittest.TestCase):
 
     def test_accepts_a_plain_tool_name_and_an_absolute_path(self):
         """A bare name and an absolute path are both accepted."""
-        for tool in ("podman", "docker", "/bin/sh"):
+        for tool in ("podman", "docker", "/usr/local/bin/podman"):
             with self.subTest(tool=tool):
                 result = self.install(CONTAINER_TOOL=tool)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -98,6 +98,7 @@ class InstallerMakeTest(unittest.TestCase):
                 "podman x",
                 "./podman",
                 "podman\nx",
+                "/bin/sh",
                 "",
             ):
                 with self.subTest(tool=tool):
@@ -352,6 +353,23 @@ class InstallerMakeTest(unittest.TestCase):
         self.assertTrue(nested, result.stdout)
         for line in nested:
             self.assertIn("USE_LOCAL_OPERATOR=false", line, line)
+
+    def test_direct_dry_run_rejects_non_set_flags(self):
+        """install-dry-run is a dry run even when DRY_RUN defaults to 0."""
+        result = self.make("install-dry-run", *BASE_ARGS, "EXTRA_HELM_ARGS=--wait")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("DRY_RUN=1 only accepts", result.stderr)
+
+    def test_direct_dry_run_requires_the_openshift_values(self):
+        result = self.make("install-dry-run", "PLATFORM=openshift",
+                           "PROFILE=dev", "NS=osac")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("DRY_RUN_CLUSTER_DOMAIN is required", result.stderr)
+
+    def test_direct_dry_run_still_rejects_an_invalid_dry_run_value(self):
+        result = self.make("install-dry-run", *BASE_ARGS, "DRY_RUN=2")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("DRY_RUN must be 0 or 1", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

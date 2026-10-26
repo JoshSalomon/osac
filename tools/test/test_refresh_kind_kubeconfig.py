@@ -125,13 +125,39 @@ class RefreshKindKubeconfigTest(unittest.TestCase):
     def test_renewal_failure_reports_the_kubectl_diagnostic(self):
         """A denied token request must surface kubectl's reason, never stdout."""
         self.command("kubectl", '#!/bin/sh\n'
-                     'echo "forbidden: User \\"sandbox-test\\" cannot create resource" >&2\n'
+                     'echo "Error from server (Forbidden): users \\"sandbox-test\\" is forbidden" >&2\n'
                      'exit 1\n')
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden", result.stderr)
         self.assertNotIn("sandbox-test", result.stderr)
         self.assertNotIn(self.new_token, result.stdout + result.stderr)
+
+    def test_unrelated_text_does_not_masquerade_as_a_missing_object(self):
+        """A "not found" mentioned in passing is not a NotFound status."""
+        self.command("kubectl", '#!/bin/sh\n'
+                     'echo "exec: credential helper not found" >&2\n'
+                     'exit 1\n')
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("without a recognised diagnostic", result.stderr)
+        self.assertNotIn("ServiceAccount", result.stderr)
+
+    def test_recognises_the_notfound_status_token(self):
+        self.command("kubectl", '#!/bin/sh\n'
+                     'echo "Error from server (NotFound): serviceaccounts \\"x\\" not found" >&2\n'
+                     'exit 1\n')
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not found (ServiceAccount or namespace missing)", result.stderr)
+
+    def test_recognises_an_unreachable_cluster(self):
+        self.command("kubectl", '#!/bin/sh\n'
+                     'echo "The connection to the server 127.0.0.1:18443 was refused" >&2\n'
+                     'exit 1\n')
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot reach the cluster", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

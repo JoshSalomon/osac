@@ -4,6 +4,7 @@
 import base64
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,21 +13,23 @@ import tempfile
 import time
 
 
+# Match kubectl's own diagnostic shapes and status tokens, not loose words: a
+# message that merely mentions "not found" is not a NotFound status.
 KUBECTL_FAILURES = (
-    ("forbidden", "forbidden (authorization denied)"),
-    ("unauthorized", "unauthorized (credentials rejected)"),
-    ("not found", "not found (ServiceAccount or namespace missing)"),
-    ("connection refused", "cannot reach the cluster"),
-    ("no route to host", "cannot reach the cluster"),
-    ("timeout", "timed out contacting the cluster"),
+    (re.compile(r"\(forbidden\)|is forbidden", re.I), "forbidden (authorization denied)"),
+    (re.compile(r"\(unauthorized\)|must be logged in", re.I), "unauthorized (credentials rejected)"),
+    (re.compile(r"\(notfound\)", re.I), "not found (ServiceAccount or namespace missing)"),
+    (re.compile(r"connection to the server|connection refused|unable to connect to the server|"
+                r"no route to host|network is unreachable|dial tcp", re.I),
+     "cannot reach the cluster"),
+    (re.compile(r"timed out|deadline exceeded", re.I), "timed out contacting the cluster"),
 )
 
 
 def kubectl_failure(stderr: str) -> str:
     """Map kubectl diagnostics to an allowlisted cause, dropping identifiers."""
-    text = (stderr or "").lower()
-    for needle, label in KUBECTL_FAILURES:
-        if needle in text:
+    for pattern, label in KUBECTL_FAILURES:
+        if pattern.search(stderr or ""):
             return label
     return "failed without a recognised diagnostic"
 

@@ -636,14 +636,28 @@ func newTaskForDelete(ciID, hubID string, hubCache controllers.HubCache) *task {
 	}.Build()
 
 	f := &function{
-		logger:   logger,
-		hubCache: hubCache,
+		logger:            logger,
+		hubCache:          hubCache,
+		networkingCleanup: &fakeWorkloadNetworkingCleanup{complete: true},
 	}
 
 	return &task{
 		r:               f,
 		computeInstance: ci,
 	}
+}
+
+type fakeWorkloadNetworkingCleanup struct {
+	complete   bool
+	calls      int
+	workloadID string
+	err        error
+}
+
+func (f *fakeWorkloadNetworkingCleanup) Cleanup(_ context.Context, workloadID string) (bool, error) {
+	f.calls++
+	f.workloadID = workloadID
+	return f.complete, f.err
 }
 
 var _ = Describe("delete", func() {
@@ -687,6 +701,24 @@ var _ = Describe("delete", func() {
 		err := t.delete(ctx)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(hasFinalizer(t.computeInstance)).To(BeFalse())
+	})
+
+	It("should retain the finalizer while automatic networking resources are terminating", func() {
+		scheme := runtime.NewScheme()
+		Expect(osacv1alpha1.AddToScheme(scheme)).To(Succeed())
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		hubCache := controllers.NewMockHubCache(ctrl)
+		hubCache.EXPECT().Get(gomock.Any(), hubID).Return(&controllers.HubEntry{
+			Namespace: hubNamespace, Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		}, nil)
+		t := newTaskForDelete(ciID, hubID, hubCache)
+		cleanup := &fakeWorkloadNetworkingCleanup{}
+		t.r.networkingCleanup = cleanup
+
+		Expect(t.delete(ctx)).To(MatchError(ContainSubstring("automatic workload networking resources are still terminating")))
+		Expect(cleanup.calls).To(Equal(1))
+		Expect(cleanup.workloadID).To(Equal(ciID))
+		Expect(hasFinalizer(t.computeInstance)).To(BeTrue())
 	})
 
 	It("should call hubClient.Delete when K8s object exists without DeletionTimestamp", func() {
@@ -807,7 +839,8 @@ var _ = Describe("delete", func() {
 		}.Build()
 
 		f := &function{
-			logger: logger,
+			logger:            logger,
+			networkingCleanup: &fakeWorkloadNetworkingCleanup{complete: true},
 		}
 
 		t := &task{
@@ -1795,7 +1828,7 @@ var _ = Describe("ensureUserDataSecret", func() {
 			computeInstance: privatev1.ComputeInstance_builder{
 				Id: ciID,
 				Spec: privatev1.ComputeInstanceSpec_builder{
-					UserData: new("#cloud-config\npackages:\n  - vim"),
+					UserDataSource: privatev1.UserDataSource_builder{Inline: new("#cloud-config\npackages:\n  - vim")}.Build(),
 				}.Build(),
 			}.Build(),
 			hubNamespace:       hubNamespace,
@@ -1844,7 +1877,7 @@ var _ = Describe("ensureUserDataSecret", func() {
 		t := &task{
 			r: &function{logger: logger, secretsClient: secretsClient},
 			computeInstance: privatev1.ComputeInstance_builder{Id: ciID, Spec: privatev1.ComputeInstanceSpec_builder{
-				UserDataSecret: privatev1.SecretLocalReference_builder{Id: "source-secret-id"}.Build(),
+				UserDataSource: privatev1.UserDataSource_builder{Secret: privatev1.SecretLocalReference_builder{Id: "source-secret-id"}.Build()}.Build(),
 			}.Build()}.Build(),
 			hubNamespace: hubNamespace, hubClient: fakeClient, userDataSecretName: ciID + userDataSecretSuffix,
 		}
@@ -1861,7 +1894,7 @@ var _ = Describe("ensureUserDataSecret", func() {
 			privatev1.SecretsGetResponse_builder{Object: privatev1.Secret_builder{Data: map[string][]byte{"other": []byte("value")}}.Build()}.Build(), nil)
 		t := &task{r: &function{logger: logger, secretsClient: secretsClient},
 			computeInstance: privatev1.ComputeInstance_builder{Spec: privatev1.ComputeInstanceSpec_builder{
-				UserDataSecret: privatev1.SecretLocalReference_builder{Id: "source-secret-id"}.Build(),
+				UserDataSource: privatev1.UserDataSource_builder{Secret: privatev1.SecretLocalReference_builder{Id: "source-secret-id"}.Build()}.Build(),
 			}.Build()}.Build(), userDataSecretName: ciID + userDataSecretSuffix}
 		Expect(t.ensureUserDataSecret(ctx, owner)).To(MatchError(ContainSubstring("missing non-empty data")))
 	})
@@ -1885,7 +1918,7 @@ var _ = Describe("ensureUserDataSecret", func() {
 			computeInstance: privatev1.ComputeInstance_builder{
 				Id: ciID,
 				Spec: privatev1.ComputeInstanceSpec_builder{
-					UserData: new("some-data"),
+					UserDataSource: privatev1.UserDataSource_builder{Inline: new("some-data")}.Build(),
 				}.Build(),
 			}.Build(),
 			hubNamespace:       hubNamespace,
@@ -1918,7 +1951,7 @@ var _ = Describe("ensureUserDataSecret", func() {
 			computeInstance: privatev1.ComputeInstance_builder{
 				Id: ciID,
 				Spec: privatev1.ComputeInstanceSpec_builder{
-					UserData: new("some-data"),
+					UserDataSource: privatev1.UserDataSource_builder{Inline: new("some-data")}.Build(),
 				}.Build(),
 			}.Build(),
 			hubNamespace:       hubNamespace,
@@ -2709,6 +2742,101 @@ var _ = Describe("instance_type resolution in reconciler", func() {
 		err = fakeClient.List(ctx, list)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(list.Items).To(HaveLen(1))
+		Expect(list.Items[0].Labels).To(HaveKeyWithValue(labels.InstanceTypeName, "test-type"))
+	})
+
+	It("updates osac.io/instance-type-name label on CR when instance_type changes", func() {
+		mockInstanceTypesClient := NewMockInstanceTypesClient(ctrl)
+		mockInstanceTypesClient.EXPECT().
+			Get(gomock.Any(), gomock.Any()).
+			Return(privatev1.InstanceTypesGetResponse_builder{
+				Object: privatev1.InstanceType_builder{
+					Id: "test-type",
+					Spec: privatev1.InstanceTypeSpec_builder{
+						Vcpus:     4,
+						MemoryGib: 8,
+					}.Build(),
+				}.Build(),
+			}.Build(), nil)
+
+		hubCache := controllers.NewMockHubCache(ctrl)
+		hubCache.EXPECT().
+			Get(gomock.Any(), "test-hub").
+			Return(&controllers.HubEntry{
+				Namespace: hubNamespace,
+				Client:    fakeClient,
+			}, nil).
+			AnyTimes()
+
+		hubsClient := controllers.NewMockHubsClient(ctrl)
+
+		computeInstancesClient := NewMockComputeInstancesClient(ctrl)
+		computeInstancesClient.EXPECT().
+			Update(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, req *privatev1.ComputeInstancesUpdateRequest, opts ...grpc.CallOption) (*privatev1.ComputeInstancesUpdateResponse, error) {
+				return &privatev1.ComputeInstancesUpdateResponse{Object: req.GetObject()}, nil
+			}).
+			AnyTimes()
+
+		// Seed an existing CR reconciled toward the previous type:
+		existingCR := &osacv1alpha1.ComputeInstance{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: hubNamespace,
+				Name:      "existing-vm",
+				Labels: map[string]string{
+					labels.ComputeInstanceUuid: "test-instance-label-update",
+					labels.InstanceTypeName:    "old-type",
+				},
+			},
+			Spec: osacv1alpha1.ComputeInstanceSpec{
+				TemplateID: "osac.templates.ocp_virt_vm",
+				VCPUs:      2,
+				MemoryGiB:  4,
+				NetworkAttachments: []osacv1alpha1.ComputeNetworkAttachment{
+					{SubnetRef: "test-sn"},
+				},
+			},
+		}
+		Expect(fakeClient.Create(ctx, existingCR)).To(Succeed())
+
+		computeInstance := privatev1.ComputeInstance_builder{
+			Id: "test-instance-label-update",
+			Metadata: privatev1.Metadata_builder{
+				Finalizers: []string{finalizers.Controller},
+				Tenant:     "test-tenant",
+			}.Build(),
+			Spec: privatev1.ComputeInstanceSpec_builder{
+				Template:     &privatev1.ComputeInstanceTemplateReference{Name: "osac.templates.ocp_virt_vm"},
+				InstanceType: &privatev1.InstanceTypeReference{Name: "test-type"},
+				NetworkAttachments: []*privatev1.ComputeNetworkAttachment{
+					privatev1.ComputeNetworkAttachment_builder{Subnet: &privatev1.SubnetLocalReference{Id: subnetID}}.Build(),
+				},
+			}.Build(),
+			Status: privatev1.ComputeInstanceStatus_builder{
+				State: privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_STARTING,
+				Hub:   "test-hub",
+			}.Build(),
+		}.Build()
+
+		f := &function{
+			logger:                 logger,
+			hubCache:               hubCache,
+			networkingHubReader:    readyComputeNetworkingHubReader("test-hub", hubNamespace, fakeClient),
+			computeInstancesClient: computeInstancesClient,
+			hubsClient:             hubsClient,
+			instanceTypesClient:    mockInstanceTypesClient,
+			maskCalculator:         nil,
+		}
+
+		err := f.run(ctx, computeInstance)
+		Expect(err).ToNot(HaveOccurred())
+
+		// Verify the CR spec was patched and the label follows the new type
+		list := &osacv1alpha1.ComputeInstanceList{}
+		err = fakeClient.List(ctx, list)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(list.Items).To(HaveLen(1))
+		Expect(list.Items[0].Spec.VCPUs).To(Equal(int32(4)))
 		Expect(list.Items[0].Labels).To(HaveKeyWithValue(labels.InstanceTypeName, "test-type"))
 	})
 

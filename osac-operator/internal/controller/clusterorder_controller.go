@@ -25,6 +25,8 @@ import (
 
 	"github.com/go-logr/logr"
 	hypershiftv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -46,6 +48,7 @@ import (
 
 	"github.com/osac-project/osac/osac-operator/api/v1alpha1"
 	"github.com/osac-project/osac/osac-operator/pkg/provisioning"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 // NewComponentFn is the type of a function that creates a required component
@@ -73,16 +76,19 @@ func (r *ClusterOrderReconciler) components() []component {
 // ClusterOrderReconciler reconciles a ClusterOrder object
 type ClusterOrderReconciler struct {
 	client.Client
-	apiReader             client.Reader
-	Scheme                *runtime.Scheme
-	ClusterOrderNamespace string
-	NetworkingNamespace   string
-	ProvisioningProvider  provisioning.ProvisioningProvider
-	StatusPollInterval    time.Duration
-	MaxJobHistory         int
-	StallThresholds       ClusterOrderStallThresholds
-	Recorder              events.EventRecorder
-	now                   func() time.Time
+	apiReader                   client.Reader
+	Scheme                      *runtime.Scheme
+	ClusterOrderNamespace       string
+	AgentNamespace              string
+	NetworkingNamespace         string
+	ClustersClient              automaticClustersGetter
+	ExternalIPAttachmentsClient automaticExternalIPAttachmentsClient
+	ProvisioningProvider        provisioning.ProvisioningProvider
+	StatusPollInterval          time.Duration
+	MaxJobHistory               int
+	StallThresholds             ClusterOrderStallThresholds
+	Recorder                    events.EventRecorder
+	now                         func() time.Time
 }
 
 const (
@@ -200,6 +206,13 @@ func (r *ClusterOrderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return res, err
 		}
 	}
+	if err == nil && instance.DeletionTimestamp.IsZero() {
+		autoAttachmentResult, autoAttachmentErr := r.reconcileAutomaticExternalIPAttachments(ctx, instance)
+		if autoAttachmentErr != nil {
+			return res, autoAttachmentErr
+		}
+		res = mergeReconcileResult(res, autoAttachmentResult)
+	}
 
 	log.Info("end reconcile")
 	return res, err
@@ -315,6 +328,19 @@ type statusTransition struct {
 	newStatus v1alpha1.ClusterOrderStatus
 }
 
+// setClusterOrderPhase records the phase and, when it changes, the time of the change, so
+// metering can bill the state transition from the moment it happened rather than from when
+// feedback noticed it. The time is stamped once per phase change and kept while the phase is
+// unchanged, the same pattern as ComputeInstance's RunningConfigSince.
+func setClusterOrderPhase(status *v1alpha1.ClusterOrderStatus, phase v1alpha1.ClusterOrderPhaseType) {
+	if status.Phase == phase {
+		return
+	}
+	status.Phase = phase
+	now := metav1.Now()
+	status.PhaseTransitionTime = &now
+}
+
 func (r *ClusterOrderReconciler) patchStatusWithRetry(ctx context.Context, key client.ObjectKey, computed v1alpha1.ClusterOrderStatus) (*statusTransition, error) {
 	var transition *statusTransition
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -323,19 +349,23 @@ func (r *ClusterOrderReconciler) patchStatusWithRetry(ctx context.Context, key c
 			return err
 		}
 		base := latest.DeepCopy()
+		deleting := !latest.DeletionTimestamp.IsZero()
 		terminalPhase := latest.Status.Phase == v1alpha1.ClusterOrderPhaseFailed ||
-			latest.Status.Phase == v1alpha1.ClusterOrderPhaseDeleting
+			latest.Status.Phase == v1alpha1.ClusterOrderPhaseDeleting || deleting
 		workerPending := !terminalPhase && computed.Phase == v1alpha1.ClusterOrderPhaseReady &&
 			latest.HasBareMetalNodeSet() && !bareMetalWorkersReady(latest)
 		switch {
+		case deleting:
+			latest.Status.Phase = v1alpha1.ClusterOrderPhaseDeleting
 		case terminalPhase:
 			// A stale reconcile must not revive a terminal order.
 		case workerPending:
-			latest.Status.Phase = v1alpha1.ClusterOrderPhaseProgressing
+			setClusterOrderPhase(&latest.Status, v1alpha1.ClusterOrderPhaseProgressing)
 		default:
-			latest.Status.Phase = computed.Phase
+			setClusterOrderPhase(&latest.Status, computed.Phase)
 		}
 		latest.Status.ClusterReference = computed.ClusterReference
+		latest.Status.UpgradeObservation = computed.UpgradeObservation
 		latest.Status.NodeRequests = computed.NodeRequests
 		latest.Status.ProvisioningJobs = computed.ProvisioningJobs
 		latest.Status.DesiredConfigVersion = computed.DesiredConfigVersion
@@ -346,10 +376,15 @@ func (r *ClusterOrderReconciler) patchStatusWithRetry(ctx context.Context, key c
 		for _, c := range computed.Conditions {
 			if c.Type == v1alpha1.ConditionWorkersFailed ||
 				(terminalPhase && c.Type == v1alpha1.ConditionProgressing) ||
+				(deleting && c.Type == v1alpha1.ConditionDeleting) ||
 				c.Type == string(v1alpha1.ClusterOrderConditionAddOnOperatorsReady) {
 				continue
 			}
 			apimeta.SetStatusCondition(&latest.Status.Conditions, c)
+		}
+		if deleting {
+			latest.SetStatusCondition(v1alpha1.ConditionDeleting, metav1.ConditionTrue,
+				"ClusterOrder is being deleted", v1alpha1.ReasonDeleting)
 		}
 		if workerPending {
 			latest.SetStatusCondition(v1alpha1.ConditionProgressing, metav1.ConditionTrue,
@@ -473,7 +508,7 @@ func (r *ClusterOrderReconciler) handleUpdate(ctx context.Context, _ reconcile.R
 
 	r.initializeStatusConditions(instance)
 	if instance.Status.Phase == "" {
-		instance.Status.Phase = v1alpha1.ClusterOrderPhaseProgressing
+		setClusterOrderPhase(&instance.Status, v1alpha1.ClusterOrderPhaseProgressing)
 	}
 	if instance.Status.Phase == v1alpha1.ClusterOrderPhaseProgressing {
 		r.initializeProgressingStage(instance)
@@ -537,7 +572,7 @@ func (r *ClusterOrderReconciler) handleUpdate(ctx context.Context, _ reconcile.R
 		}
 	} else if instance.Status.Phase != v1alpha1.ClusterOrderPhaseFailed &&
 		instance.Status.Phase != v1alpha1.ClusterOrderPhaseDeleting {
-		instance.Status.Phase = v1alpha1.ClusterOrderPhaseProgressing
+		setClusterOrderPhase(&instance.Status, v1alpha1.ClusterOrderPhaseProgressing)
 		r.setProgressingStage(instance, v1alpha1.ReasonControlPlaneStarting)
 	}
 
@@ -581,6 +616,7 @@ func (r *ClusterOrderReconciler) handleHostedCluster(ctx context.Context, instan
 	if err := r.handleNodePools(ctx, instance, nodePools); err != nil {
 		return err
 	}
+	recordUpgradeObservations(instance, hc, nodePools.Items)
 	// A successful provisioning job only means that the infrastructure request
 	// was accepted. Derive terminal readiness from the live HostedCluster and
 	// NodePool observations in this reconcile.
@@ -642,7 +678,7 @@ func (r *ClusterOrderReconciler) reconcileClusterOrderReadiness(
 		return
 	}
 	if !hostedClusterControlPlaneIsAvailable(hostedCluster) || !hostedClusterIsReady(hostedCluster) {
-		instance.Status.Phase = v1alpha1.ClusterOrderPhaseProgressing
+		setClusterOrderPhase(&instance.Status, v1alpha1.ClusterOrderPhaseProgressing)
 		r.setProgressingStage(instance, deriveProvisioningSubStage(hostedCluster))
 		return
 	}
@@ -650,13 +686,13 @@ func (r *ClusterOrderReconciler) reconcileClusterOrderReadiness(
 	instance.SetStatusCondition(v1alpha1.ConditionClusterAvailable, metav1.ConditionTrue, "", v1alpha1.ReasonAsExpected)
 
 	if instance.HasBareMetalNodeSet() && !bareMetalWorkersReady(instance) {
-		instance.Status.Phase = v1alpha1.ClusterOrderPhaseProgressing
+		setClusterOrderPhase(&instance.Status, v1alpha1.ClusterOrderPhaseProgressing)
 		instance.SetStatusCondition(v1alpha1.ConditionProgressing, metav1.ConditionTrue,
 			humanizeConditionName(v1alpha1.ReasonWorkersJoining), v1alpha1.ReasonWorkersJoining)
 		return
 	}
 
-	instance.Status.Phase = v1alpha1.ClusterOrderPhaseReady
+	setClusterOrderPhase(&instance.Status, v1alpha1.ClusterOrderPhaseReady)
 	instance.SetStatusCondition(v1alpha1.ConditionProgressing, metav1.ConditionFalse, "", v1alpha1.ReasonAsExpected)
 }
 
@@ -791,12 +827,27 @@ func reconcileVIPEndpoints(instance *v1alpha1.ClusterOrder) {
 
 func (r *ClusterOrderReconciler) handleNodePools(ctx context.Context, instance *v1alpha1.ClusterOrder,
 	nodePools *hypershiftv1beta1.NodePoolList) error {
+	present := make(map[string]bool, len(nodePools.Items))
 	for i := range len(nodePools.Items) {
+		if name, ok := nodePoolNodeSet(&nodePools.Items[i]); ok {
+			present[name] = true
+		}
 		err := r.handleNodePool(ctx, instance, &nodePools.Items[i])
 		if err != nil {
 			return fmt.Errorf("failed to handle node pool %d: %w", i, err)
 		}
 	}
+	desired := make(map[string]bool, len(instance.Spec.NodeRequests))
+	for _, request := range instance.Spec.NodeRequests {
+		desired[request.NodeSet] = true
+	}
+	retained := instance.Status.NodeRequests[:0]
+	for _, request := range instance.Status.NodeRequests {
+		if desired[request.NodeSet] || present[request.NodeSet] {
+			retained = append(retained, request)
+		}
+	}
+	instance.Status.NodeRequests = retained
 	return nil
 }
 
@@ -1000,7 +1051,7 @@ func finalizeReadyIfProvisioned(log logr.Logger, instance *v1alpha1.ClusterOrder
 	if !hostedClusterAndNodePoolsAreReady(instance, hc, nodePools) {
 		return false
 	}
-	instance.Status.Phase = v1alpha1.ClusterOrderPhaseReady
+	setClusterOrderPhase(&instance.Status, v1alpha1.ClusterOrderPhaseReady)
 	instance.SetStatusCondition(v1alpha1.ConditionProgressing, metav1.ConditionFalse, "", v1alpha1.ReasonAsExpected)
 	return true
 }
@@ -1067,7 +1118,7 @@ func (r *ClusterOrderReconciler) handleDelete(ctx context.Context, _ reconcile.R
 	log := ctrllog.FromContext(ctx)
 	log.Info("deleting clusterorder")
 
-	instance.Status.Phase = v1alpha1.ClusterOrderPhaseDeleting
+	setClusterOrderPhase(&instance.Status, v1alpha1.ClusterOrderPhaseDeleting)
 	instance.SetStatusCondition(v1alpha1.ConditionDeleting, metav1.ConditionTrue,
 		"ClusterOrder is being deleted", v1alpha1.ReasonDeleting)
 
@@ -1129,74 +1180,54 @@ func (r *ClusterOrderReconciler) handleDelete(ctx context.Context, _ reconcile.R
 	return ctrl.Result{}, nil
 }
 
-// reconcileAutoExternalIPCleanup deletes auto-provisioned ExternalIPAttachments and
+// reconcileAutoExternalIPCleanup deletes automatically created ExternalIPAttachments and
 // ExternalIPs for this ClusterOrder in phase order: EIAs first, then EIPs. Returns
 // (done=true) when cleanup is complete or not applicable, (done=false) with a requeue
 // result when resources still exist.
 func (r *ClusterOrderReconciler) reconcileAutoExternalIPCleanup(ctx context.Context, instance *v1alpha1.ClusterOrder) (bool, ctrl.Result, error) {
-	if r.NetworkingNamespace == "" {
-		return true, ctrl.Result{}, nil
+	return reconcileAutoExternalIPCleanup(ctx, r.Client, r.NetworkingNamespace, autoExternalIPOwner{
+		kind: clusterOrderOwner,
+		id:   instance.GetLabels()[osacClusterOrderIDLabel],
+	}, r.StatusPollInterval)
+}
+
+func (r *ClusterOrderReconciler) reconcileAutomaticExternalIPAttachments(
+	ctx context.Context,
+	instance *v1alpha1.ClusterOrder,
+) (ctrl.Result, error) {
+	if instance.Status.Phase != v1alpha1.ClusterOrderPhaseReady || r.ClustersClient == nil ||
+		r.ExternalIPAttachmentsClient == nil || r.NetworkingNamespace == "" {
+		return ctrl.Result{}, nil
 	}
-	clusterUUID, exists := instance.GetLabels()[osacClusterOrderIDLabel]
-	if !exists || clusterUUID == "" {
-		return true, ctrl.Result{}, nil
+	clusterID := instance.Labels[osacClusterOrderIDLabel]
+	if clusterID == "" {
+		return ctrl.Result{}, nil
+	}
+	response, err := r.ClustersClient.Get(ctx, privatev1.ClustersGetRequest_builder{Id: clusterID}.Build())
+	if status.Code(err) == codes.NotFound {
+		return ctrl.Result{}, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("get Fulfillment Cluster %q for automatic ExternalIPAttachment: %w", clusterID, err)
+	}
+	cluster := response.GetObject()
+	if cluster == nil || !cluster.GetSpec().GetAutoExternalIpAttachment() {
+		return ctrl.Result{}, nil
 	}
 
-	log := ctrllog.FromContext(ctx)
-
-	// Phase 1: ExternalIPAttachments targeting this cluster, labeled auto-provisioned.
-	eiaList := &v1alpha1.ExternalIPAttachmentList{}
-	if err := r.List(ctx, eiaList,
-		client.InNamespace(r.NetworkingNamespace),
-		client.MatchingLabels{osacAutoProvisionedLabel: labelValueTrue},
-	); err != nil {
-		return false, ctrl.Result{}, err
-	}
-	var pendingEIAs int
-	for i := range eiaList.Items {
-		eia := &eiaList.Items[i]
-		if eia.Spec.Cluster == nil || *eia.Spec.Cluster != clusterUUID {
-			continue
-		}
-		pendingEIAs++
-		if eia.DeletionTimestamp.IsZero() {
-			log.Info("deleting auto-provisioned ExternalIPAttachment", "name", eia.Name)
-			if err := client.IgnoreNotFound(r.Delete(ctx, eia)); err != nil {
-				return false, ctrl.Result{}, err
-			}
-		}
-	}
-	if pendingEIAs > 0 {
-		return false, ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
-	}
-
-	// Phase 2: ExternalIPs labeled auto-provisioned-for this cluster.
-	eipList := &v1alpha1.ExternalIPList{}
-	if err := r.List(ctx, eipList,
-		client.InNamespace(r.NetworkingNamespace),
-		client.MatchingLabels{
-			osacAutoProvisionedLabel:    labelValueTrue,
-			osacAutoProvisionedForLabel: clusterUUID,
+	target := automaticExternalIPAttachmentTarget{
+		owner:     autoExternalIPOwner{kind: clusterOrderOwner, id: clusterID},
+		kind:      clusterOrderOwner,
+		kindLabel: autoExternalIPKindLabel(clusterOrderOwner),
+		tenant:    cluster.GetMetadata().GetTenant(),
+		endpoints: []string{autoCreatedEndpointAPI, autoCreatedEndpointIngress},
+		availableEndpoints: map[string]bool{
+			autoCreatedEndpointAPI:     instance.Status.ApiEndpoint != "",
+			autoCreatedEndpointIngress: instance.Status.IngressEndpoint != "",
 		},
-	); err != nil {
-		return false, ctrl.Result{}, err
 	}
-	var pendingEIPs int
-	for i := range eipList.Items {
-		eip := &eipList.Items[i]
-		pendingEIPs++
-		if eip.DeletionTimestamp.IsZero() {
-			log.Info("deleting auto-provisioned ExternalIP", "name", eip.Name)
-			if err := client.IgnoreNotFound(r.Delete(ctx, eip)); err != nil {
-				return false, ctrl.Result{}, err
-			}
-		}
-	}
-	if pendingEIPs > 0 {
-		return false, ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
-	}
-
-	return true, ctrl.Result{}, nil
+	return reconcileAutomaticExternalIPAttachments(ctx, r.Client, r.NetworkingNamespace,
+		r.ExternalIPAttachmentsClient, r.StatusPollInterval, target)
 }
 
 func (r *ClusterOrderReconciler) provisionState(instance *v1alpha1.ClusterOrder) *provisioning.State {
@@ -1214,7 +1245,7 @@ func (r *ClusterOrderReconciler) provisioningCallbacks(instance *v1alpha1.Cluste
 			// stays Progressing and the failed job is visible in status.provisioningJobs.
 			if instance.Status.ClusterReference == nil ||
 				instance.Status.ClusterReference.HostedClusterName == "" {
-				instance.Status.Phase = v1alpha1.ClusterOrderPhaseFailed
+				setClusterOrderPhase(&instance.Status, v1alpha1.ClusterOrderPhaseFailed)
 				instance.SetStatusCondition(v1alpha1.ConditionProgressing, metav1.ConditionFalse, message, v1alpha1.ReasonProvisioningFailed)
 			}
 		},

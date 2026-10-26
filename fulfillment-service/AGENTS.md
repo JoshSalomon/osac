@@ -35,6 +35,7 @@ respective areas.
 
 ## Invariants
 
+- Never edit this file.
 - Do not hand-edit `../proto/public/`, `../proto/gen/`, `*_mock.go`, or `go.sum`.
 - Express field and cross-field validation with proto validation annotations when possible, not duplicated Go checks.
 - Base resource messages follow the custom `OSAC_OBJECT_SHAPE` rule. An intentional exception requires `// buf:lint:ignore OSAC_OBJECT_SHAPE` directly above the message.
@@ -74,15 +75,10 @@ ginkgo run --timeout 20m -r internal # All unit suites. Slow, run only when nece
 
 Integration tests run in a local Kind Kubernetes cluster; the installer builds and deploys current images.
 
-See the [fulfillment-service test tiers and coverage notes](../docs/INTEGRATION-TESTING.md#fulfillment-service).
-
-FabricDomain API authorization, tenant filtering, CRUD persistence, and cleanup
-are component-integration coverage in
-[`it/it_fabric_domain_tenant_api_test.go`](it/it_fabric_domain_tenant_api_test.go).
-Run it through the `SUITE=fulfillment` installer target; that stage deploys the
-service and database with the operator disabled, so it does not exercise Netris
-or AAP. The complete provider lifecycle belongs to the BMaaS E2E coverage in
-OSAC-4786.
+The Tenant storage projection fixture `it/it_tenant_storage_onboarding_test.go`
+checks persisted conditions through fresh reads and repeated explicit signals
+([OSAC-6684](https://redhat.atlassian.net/browse/OSAC-6684)). Operator status is
+fixture-controlled; provider workflows are outside its scope.
 
 ```bash
 export KUBECONFIG="$HOME/.kube/osac-dev-kind.kubeconfig"

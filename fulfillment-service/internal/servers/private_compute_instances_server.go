@@ -54,24 +54,23 @@ var _ privatev1.ComputeInstancesServer = (*PrivateComputeInstancesServer)(nil)
 type PrivateComputeInstancesServer struct {
 	privatev1.UnimplementedComputeInstancesServer
 
-	logger                  *slog.Logger
-	tenancyLogic            auth.TenancyLogic
-	generic                 *GenericServer[*privatev1.ComputeInstance]
-	templatesDao            *dao.GenericDAO[*privatev1.ComputeInstanceTemplate]
-	catalogItemsDao         *dao.GenericDAO[*privatev1.ComputeInstanceCatalogItem]
-	networkClassesDao       *dao.GenericDAO[*privatev1.NetworkClass]
-	subnetsDao              *dao.GenericDAO[*privatev1.Subnet]
-	virtualNetworksDao      *dao.GenericDAO[*privatev1.VirtualNetwork]
-	securityGroupsDao       *dao.GenericDAO[*privatev1.SecurityGroup]
-	instanceTypesDao        *dao.GenericDAO[*privatev1.InstanceType]
-	diskImagesDao           *dao.GenericDAO[*privatev1.DiskImage]
-	externalIPPoolDao       *dao.GenericDAO[*privatev1.ExternalIPPool]
-	externalIPDao           *dao.GenericDAO[*privatev1.ExternalIP]
-	externalIPAttachmentDao *dao.GenericDAO[*privatev1.ExternalIPAttachment]
-	lifecycle               *externalIPLifecycle
-	secretsDao              *dao.GenericDAO[*privatev1.Secret]
-	secretStore             vault.SecretStore
-	storageTiersDao         *dao.GenericDAO[*privatev1.StorageTier]
+	logger             *slog.Logger
+	tenancyLogic       auth.TenancyLogic
+	generic            *GenericServer[*privatev1.ComputeInstance]
+	templatesDao       *dao.GenericDAO[*privatev1.ComputeInstanceTemplate]
+	catalogItemsDao    *dao.GenericDAO[*privatev1.ComputeInstanceCatalogItem]
+	networkClassesDao  *dao.GenericDAO[*privatev1.NetworkClass]
+	subnetsDao         *dao.GenericDAO[*privatev1.Subnet]
+	virtualNetworksDao *dao.GenericDAO[*privatev1.VirtualNetwork]
+	securityGroupsDao  *dao.GenericDAO[*privatev1.SecurityGroup]
+	instanceTypesDao   *dao.GenericDAO[*privatev1.InstanceType]
+	diskImagesDao      *dao.GenericDAO[*privatev1.DiskImage]
+	externalIPPoolDao  *dao.GenericDAO[*privatev1.ExternalIPPool]
+	externalIPDao      *dao.GenericDAO[*privatev1.ExternalIP]
+	lifecycle          *externalIPLifecycle
+	secretsDao         *dao.GenericDAO[*privatev1.Secret]
+	secretStore        vault.SecretStore
+	storageTiersDao    *dao.GenericDAO[*privatev1.StorageTier]
 }
 
 func NewPrivateComputeInstancesServer() *PrivateComputeInstancesServerBuilder {
@@ -250,23 +249,22 @@ func (b *PrivateComputeInstancesServerBuilder) Build() (result *PrivateComputeIn
 		return
 	}
 	result = &PrivateComputeInstancesServer{
-		storageTiersDao:         storageTiersDao,
-		logger:                  b.logger,
-		tenancyLogic:            b.tenancyLogic,
-		generic:                 generic,
-		templatesDao:            templatesDao,
-		catalogItemsDao:         catalogItemsDao,
-		networkClassesDao:       networkClassesDao,
-		subnetsDao:              subnetsDao,
-		virtualNetworksDao:      virtualNetworksDao,
-		securityGroupsDao:       securityGroupsDao,
-		instanceTypesDao:        instanceTypesDao,
-		diskImagesDao:           diskImagesDao,
-		externalIPPoolDao:       externalIPPoolDao,
-		externalIPDao:           externalIPDao,
-		externalIPAttachmentDao: externalIPAttachmentDao,
-		secretsDao:              secretsDao,
-		secretStore:             b.secretStore,
+		storageTiersDao:    storageTiersDao,
+		logger:             b.logger,
+		tenancyLogic:       b.tenancyLogic,
+		generic:            generic,
+		templatesDao:       templatesDao,
+		catalogItemsDao:    catalogItemsDao,
+		networkClassesDao:  networkClassesDao,
+		subnetsDao:         subnetsDao,
+		virtualNetworksDao: virtualNetworksDao,
+		securityGroupsDao:  securityGroupsDao,
+		instanceTypesDao:   instanceTypesDao,
+		diskImagesDao:      diskImagesDao,
+		externalIPPoolDao:  externalIPPoolDao,
+		externalIPDao:      externalIPDao,
+		secretsDao:         secretsDao,
+		secretStore:        b.secretStore,
 	}
 	result.lifecycle = newExternalIPLifecycle(
 		externalIPDao,
@@ -479,9 +477,9 @@ func (s *PrivateComputeInstancesServer) validateStorageTiers(ctx context.Context
 
 // validateWindowsUserData enforces XML well-formedness on user data when the DiskImage's
 // guest OS family is Windows. For non-Windows images (or when no user data is present), this
-// is a no-op — Linux user_data is treated as opaque content (existing behavior preserved).
+// is a no-op — Linux user_data_source.inline is treated as opaque content (existing behavior preserved).
 //
-// Error messages for user_data_secret intentionally omit the secret content to prevent
+// Error messages for user_data_source.secret intentionally omit the secret content to prevent
 // leaking sensitive data (design §4.3).
 //
 // Implements IC-1 from design §5.
@@ -496,47 +494,47 @@ func (s *PrivateComputeInstancesServer) validateWindowsUserData(
 
 	spec := ci.GetSpec()
 
-	// Validate inline user_data.
-	if spec.HasUserData() {
-		if err := isPureXMLNoDTD([]byte(spec.GetUserData())); err != nil {
+	// Validate inline user data.
+	if spec.GetUserDataSource().HasInline() {
+		if err := isPureXMLNoDTD([]byte(spec.GetUserDataSource().GetInline())); err != nil {
 			return grpcstatus.Errorf(grpccodes.InvalidArgument,
-				"user_data is not well-formed XML: %s", err)
+				"user_data_source.inline is not well-formed XML: %s", err)
 		}
 		return nil
 	}
 
-	// Validate user_data_secret content. The reference has already been resolved and
+	// Validate user_data_source.secret content. The reference has already been resolved and
 	// canonicalized by validateAndResolveUserDataSecret; load the secret data to check
 	// its content format.
-	ref := spec.GetUserDataSecret()
+	ref := spec.GetUserDataSource().GetSecret()
 	if ref == nil {
 		return nil
 	}
 
 	secretResponse, err := s.secretsDao.Get().SetId(ref.GetId()).Do(ctx)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "Failed to load user_data_secret for XML validation", "error", err)
-		return grpcstatus.Errorf(grpccodes.Internal, "failed to validate user_data_secret content")
+		s.logger.ErrorContext(ctx, "Failed to load user_data_source.secret for XML validation", "error", err)
+		return grpcstatus.Errorf(grpccodes.Internal, "failed to validate user_data_source.secret content")
 	}
 	secret := secretResponse.GetObject()
 	data := secret.GetData()
 	if len(data) == 0 && secret.GetBackend() == privatev1.SecretBackend_SECRET_BACKEND_VAULT {
 		if s.secretStore == nil {
-			s.logger.ErrorContext(ctx, "Failed to load user_data_secret for XML validation: secret store isn't configured")
-			return grpcstatus.Errorf(grpccodes.Internal, "failed to validate user_data_secret content")
+			s.logger.ErrorContext(ctx, "Failed to load user_data_source.secret for XML validation: secret store isn't configured")
+			return grpcstatus.Errorf(grpccodes.Internal, "failed to validate user_data_source.secret content")
 		}
 		metadata := secret.GetMetadata()
 		data, err = s.secretStore.Fetch(ctx, metadata.GetTenant(), metadata.GetProject(), metadata.GetName())
 		if err != nil {
-			s.logger.ErrorContext(ctx, "Failed to load user_data_secret value from store for XML validation", "error", err)
-			return grpcstatus.Errorf(grpccodes.Internal, "failed to validate user_data_secret content")
+			s.logger.ErrorContext(ctx, "Failed to load user_data_source.secret value from store for XML validation", "error", err)
+			return grpcstatus.Errorf(grpccodes.Internal, "failed to validate user_data_source.secret content")
 		}
 	}
 
 	value := data[userDataSecretDataKey]
 	if err := isPureXMLNoDTD(value); err != nil {
 		return grpcstatus.Errorf(grpccodes.InvalidArgument,
-			"secret '%s' referenced by user_data_secret contains user data that is not well-formed XML",
+			"secret '%s' referenced by user_data_source.secret contains user data that is not well-formed XML",
 			refKey(ref))
 	}
 	return nil
@@ -587,20 +585,20 @@ func (s *PrivateComputeInstancesServer) Update(ctx context.Context,
 			candidate.GetSpec().SetInstanceType(current.GetSpec().GetInstanceType())
 			return nil
 		}
-		if err := validateComputeInstanceImmutability(current, candidate, request.GetUpdateMask()); err != nil {
-			return err
-		}
 		if err := s.validateAndResolveUserDataSecret(
 			ctx,
 			candidate.GetSpec(),
-			updateIncludesField(request.GetUpdateMask(), "spec.user_data_secret"),
+			updateIncludesField(request.GetUpdateMask(), "spec.user_data_source"),
 		); err != nil {
 			return err
 		}
-		if updateIncludesField(request.GetUpdateMask(), "spec.user_data", "spec.user_data_secret") {
+		if err := validateComputeInstanceImmutability(current, candidate, request.GetUpdateMask()); err != nil {
+			return err
+		}
+		if updateIncludesField(request.GetUpdateMask(), "spec.user_data_source") {
 			// Resolve the disk image without lifecycle checks: disk_image is
 			// immutable, so the image may have become OBSOLETE after instance
-			// creation. Blocking user_data updates in that case would
+			// creation. Blocking user_data_source.inline updates in that case would
 			// permanently lock out the user.
 			diskImage, err := s.lookupDiskImageForUpdate(ctx, candidate)
 			if err != nil {
@@ -647,81 +645,34 @@ func (s *PrivateComputeInstancesServer) validateAndResolveUserDataSecret(
 	spec *privatev1.ComputeInstanceSpec,
 	resolve bool,
 ) error {
-	if spec.HasUserData() && spec.GetUserDataSecret() != nil {
-		return grpcstatus.Errorf(grpccodes.InvalidArgument,
-			"user_data and user_data_secret are mutually exclusive")
-	}
-	if !resolve || spec.GetUserDataSecret() == nil {
+	if !resolve || spec.GetUserDataSource().GetSecret() == nil {
 		return nil
 	}
 	resolved, err := validateUserDataSecret(
-		ctx, s.logger, s.secretsDao, s.secretStore, spec.GetUserDataSecret(),
+		ctx, s.logger, s.secretsDao, s.secretStore, spec.GetUserDataSource().GetSecret(),
 	)
 	if err != nil {
 		return err
 	}
-	spec.SetUserDataSecret(resolved)
+	spec.GetUserDataSource().SetSecret(resolved)
 	return nil
 }
 
 func (s *PrivateComputeInstancesServer) Delete(ctx context.Context,
 	request *privatev1.ComputeInstancesDeleteRequest) (response *privatev1.ComputeInstancesDeleteResponse, err error) {
 	id := request.GetId()
-	if id != "" {
-		getResponse, getErr := s.generic.dao.Get().SetId(id).SetLock(true).Do(ctx)
-		if getErr != nil {
-			var notFoundErr *dao.ErrNotFound
-			if !errors.As(getErr, &notFoundErr) {
-				err = getErr
-				return
-			}
-		} else {
-			ci := getResponse.GetObject()
-			if err = s.rejectManualExternalIPAttachments(ctx, ci); err != nil {
-				return
-			}
-			if ci.GetSpec().GetAutoExternalIpAttachment() && !hasComputeInstanceFinalizer(ci, finalizers.Controller) {
-				ensureComputeInstanceFinalizer(ci, finalizers.Controller)
-				if _, err = s.generic.dao.Update().SetObject(ci).Do(ctx); err != nil {
-					return
-				}
-			}
-		}
+	if id == "" {
+		return nil, grpcstatus.Error(grpccodes.InvalidArgument, "identifier is mandatory")
+	}
+	instance, err := lockLifecycleResource(ctx, s.generic.dao, id, "ComputeInstance")
+	if err != nil {
+		return
+	}
+	if err = s.lifecycle.rejectManualAttachmentDelete(ctx, "ComputeInstance", id, instance.GetMetadata()); err != nil {
+		return
 	}
 	err = s.generic.Delete(ctx, request, &response)
 	return
-}
-
-func (s *PrivateComputeInstancesServer) rejectManualExternalIPAttachments(
-	ctx context.Context,
-	ci *privatev1.ComputeInstance,
-) error {
-	if ci == nil || ci.GetId() == "" {
-		return nil
-	}
-	ciName := ci.GetMetadata().GetName()
-	filter := fmt.Sprintf(
-		"this.metadata.tenant == %q && (this.spec.compute_instance.id == %q || this.spec.compute_instance.name == %q)",
-		ci.GetMetadata().GetTenant(), ci.GetId(), ciName,
-	)
-	response, err := s.externalIPAttachmentDao.List().SetFilter(filter).SetLimit(1000).Do(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to check ComputeInstance ExternalIPAttachments: %w", err)
-	}
-	if response.GetTotal() > 1000 {
-		return grpcstatus.Errorf(grpccodes.FailedPrecondition,
-			"ComputeInstance '%s' has too many ExternalIPAttachments to safely delete", ci.GetId())
-	}
-	for _, attachment := range response.GetItems() {
-		if attachment.GetMetadata().GetLabels()[autoCreatedLabel] == "true" &&
-			attachment.GetMetadata().GetAnnotations()[ownerReferenceAnnotation] == ci.GetId() {
-			continue
-		}
-		return grpcstatus.Errorf(grpccodes.FailedPrecondition,
-			"ComputeInstance '%s' has manually created ExternalIPAttachment '%s'; delete it before deleting the ComputeInstance",
-			ci.GetId(), attachment.GetId())
-	}
-	return nil
 }
 
 func ensureComputeInstanceFinalizer(ci *privatev1.ComputeInstance, finalizer string) {
@@ -737,18 +688,6 @@ func ensureComputeInstanceFinalizer(ci *privatev1.ComputeInstance, finalizer str
 		}
 	}
 	ci.GetMetadata().SetFinalizers(append(ci.GetMetadata().GetFinalizers(), finalizer))
-}
-
-func hasComputeInstanceFinalizer(ci *privatev1.ComputeInstance, finalizer string) bool {
-	if ci == nil || !ci.HasMetadata() {
-		return false
-	}
-	for _, current := range ci.GetMetadata().GetFinalizers() {
-		if current == finalizer {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *PrivateComputeInstancesServer) Signal(ctx context.Context,
@@ -895,7 +834,7 @@ func (s *PrivateComputeInstancesServer) validateDiskImage(
 // validation. disk_image is immutable, so on the update path we only need the
 // image's metadata (e.g. guest OS family) for user-data validation; the image
 // may have transitioned to OBSOLETE after the instance was created and that must
-// not block subsequent user_data changes.
+// not block subsequent user_data_source.inline changes.
 func (s *PrivateComputeInstancesServer) lookupDiskImageForUpdate(
 	ctx context.Context,
 	ci *privatev1.ComputeInstance,
@@ -1015,10 +954,10 @@ func validateComputeTemplateImmutability(
 	updatingDiskImage := updateIncludesField(updateMask, "spec.disk_image")
 	updatingSshKey := updateIncludesField(updateMask, "spec.ssh_key")
 	updatingAutoExternalIP := updateIncludesField(updateMask, "spec.auto_external_ip_attachment")
-	updatingUserDataSecret := updateIncludesField(updateMask, "spec.user_data_secret")
+	updatingUserDataSource := updateIncludesField(updateMask, "spec.user_data_source")
 
 	if !updatingTemplate && !updatingTemplateParams && !updatingCatalogItem &&
-		!updatingDiskImage && !updatingSshKey && !updatingAutoExternalIP && !updatingUserDataSecret {
+		!updatingDiskImage && !updatingSshKey && !updatingAutoExternalIP && !updatingUserDataSource {
 		return nil
 	}
 
@@ -1066,15 +1005,7 @@ func validateComputeTemplateImmutability(
 	if updatingSshKey {
 		existingKey := existingSpec.GetSshKey()
 		newKey := newSpec.GetSshKey()
-		sameKey := proto.Equal(existingKey, newKey)
-		if existingKey != nil && newKey != nil {
-			if newKey.GetId() != "" {
-				sameKey = existingKey.GetId() == newKey.GetId()
-			} else {
-				sameKey = existingKey.GetName() == newKey.GetName()
-			}
-		}
-		if !sameKey {
+		if !sameSecretReference(existingKey, newKey) {
 			return grpcstatus.Errorf(grpccodes.InvalidArgument,
 				"cannot change spec.ssh_key: ssh_key is immutable after creation")
 		}
@@ -1091,13 +1022,11 @@ func validateComputeTemplateImmutability(
 			"cannot change spec.auto_external_ip_attachment: auto_external_ip_attachment is immutable after creation")
 	}
 
-	// The user_data_secret reference is immutable once set. Setting it for the first time is
-	// allowed, including migration from inline user_data, and it cannot be changed or cleared
-	// afterwards. Mutual exclusion with inline user_data is enforced separately.
-	if updatingUserDataSecret && existingSpec.GetUserDataSecret() != nil &&
-		!proto.Equal(existingSpec.GetUserDataSecret(), newSpec.GetUserDataSecret()) {
+	// A Secret source is immutable once set. Inline content may be migrated to a Secret.
+	if updatingUserDataSource && existingSpec.GetUserDataSource().GetSecret() != nil &&
+		!sameSecretReference(existingSpec.GetUserDataSource().GetSecret(), newSpec.GetUserDataSource().GetSecret()) {
 		return grpcstatus.Errorf(grpccodes.InvalidArgument,
-			"cannot change spec.user_data_secret: user_data_secret is immutable after creation")
+			"cannot change spec.user_data_source.secret: user_data_source.secret is immutable after creation")
 	}
 
 	return nil
@@ -1363,7 +1292,7 @@ func (s *PrivateComputeInstancesServer) validateNetworkReferencesState(
 		securityGroupRefs := att.GetSecurityGroups()
 
 		subnetKey := refKey(subnetRef)
-		subnet, err := resolveAndCanonicalizeReference(ctx, s.subnetsDao, vm.GetMetadata(), subnetRef,
+		subnet, err := resolveAndCanonicalizeLockedReference(ctx, s.subnetsDao, vm.GetMetadata(), subnetRef,
 			"subnet", grpccodes.NotFound)
 		if err != nil {
 			if grpcstatus.Code(err) == grpccodes.NotFound {
@@ -1396,7 +1325,7 @@ func (s *PrivateComputeInstancesServer) validateNetworkReferencesState(
 			}
 			sgKey := refKey(sgRef)
 
-			sg, err := resolveAndCanonicalizeReference(ctx, s.securityGroupsDao, vm.GetMetadata(), sgRef,
+			sg, err := resolveAndCanonicalizeLockedReference(ctx, s.securityGroupsDao, vm.GetMetadata(), sgRef,
 				"security group", grpccodes.NotFound)
 			if err != nil {
 				if grpcstatus.Code(err) == grpccodes.NotFound {
@@ -1507,11 +1436,6 @@ func (s *PrivateComputeInstancesServer) resolveCatalogItem(
 	return resolvedTemplate, nil
 }
 
-const (
-	autoCreatedLabel    = "osac.openshift.io/auto-created"
-	autoCreatedForLabel = "osac.openshift.io/auto-created-for"
-)
-
 func (s *PrivateComputeInstancesServer) autoProvisionExternalIP(
 	ctx context.Context, ci *privatev1.ComputeInstance,
 ) error {
@@ -1527,18 +1451,22 @@ func (s *PrivateComputeInstancesServer) autoProvisionExternalIP(
 		shortID = shortID[:8]
 	}
 
+	eipLabels := map[string]string{
+		autoCreatedLabel:            "true",
+		autoCreatedForLabel:         ciID,
+		autoAttachmentDeferredLabel: "true",
+		autoCreatedKindLabel:        "compute_instance",
+	}
 	eip := privatev1.ExternalIP_builder{
 		Metadata: privatev1.Metadata_builder{
 			Name:   fmt.Sprintf("auto-eip-%s", shortID),
 			Tenant: tenant,
-			Labels: map[string]string{
-				autoCreatedLabel:    "true",
-				autoCreatedForLabel: ciID,
-			},
+			Labels: eipLabels,
 			Annotations: map[string]string{
+				tenantAnnotation:         tenant,
 				ownerReferenceAnnotation: ciID,
 			},
-			Creator: "system",
+			Creator: systemCreator,
 		}.Build(),
 		Spec: privatev1.ExternalIPSpec_builder{
 			Pool: privatev1.ExternalIPPoolReference_builder{Id: pool.GetId()}.Build(),
@@ -1548,20 +1476,15 @@ func (s *PrivateComputeInstancesServer) autoProvisionExternalIP(
 		}.Build(),
 	}.Build()
 
-	eipResp, err := s.externalIPDao.Create().SetObject(eip).Do(ctx)
+	_, err = s.externalIPDao.Create().SetObject(eip).Do(ctx)
 	if err != nil {
 		return fmt.Errorf("auto_external_ip_attachment: failed to create ExternalIP: %w", err)
-	}
-	eipID := eipResp.GetObject().GetId()
-
-	err = s.lifecycle.lockNewAttachmentReferences(ctx, eipID, ciID, s.generic.dao)
-	if err != nil {
-		return fmt.Errorf("auto_external_ip_attachment: failed to lock attachment references: %w", err)
 	}
 
 	err = UpdatePoolCapacity(ctx, s.externalIPPoolDao, pool.GetId(), 1)
 	if err != nil {
 		return grpcstatus.Errorf(grpccodes.FailedPrecondition, "auto_external_ip_attachment: %s", err)
 	}
+
 	return nil
 }

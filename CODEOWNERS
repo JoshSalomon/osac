@@ -14,6 +14,7 @@
 # Protects this file from unauthorized modification
 /CODEOWNERS @osac-project/wg-infra
 /osac-ui/ @LiorSoffer @batzionb @rawagner @ElayAharoni
+/bare-metal-fulfillment-operator/ @osac-project/wg-bmaas
 
 # CI pipeline definition
 # A pull request can change the workflows and scripts that produce the checks it is judged by, and then a passing
@@ -44,3 +45,43 @@
 # - Accidental security regressions
 .github/workflows/fullsend.yaml @osac-project/wg-infra
 .fullsend/ @osac-project/wg-infra
+
+# CaaS (Cluster-as-a-Service) working group
+# Tests
+/tests/e2e/caas/ @osac-project/wg-caas
+/tests/unit/test_caas_*.py @osac-project/wg-caas
+/osac-aap/tests/integration/targets/cluster_create_caas/ @osac-project/wg-caas
+/osac-aap/tests/integration/targets/cluster_delete_caas/ @osac-project/wg-caas
+# CaaS CI installer values
+/osac-installer/values/caas-ci/ @osac-project/wg-caas
+# CaaS cluster templates (HyperShift hosted-cluster provisioning)
+/osac-aap/collections/ansible_collections/osac/templates/roles/ocp_small/ @osac-project/wg-caas
+/osac-aap/collections/ansible_collections/osac/templates/roles/ocp_ci_small/ @osac-project/wg-caas
+/osac-aap/collections/ansible_collections/osac/templates/roles/ocp_4_20_small_nico/ @osac-project/wg-caas
+# CaaS hosted-cluster service role and workflow
+/osac-aap/collections/ansible_collections/osac/service/roles/hosted_cluster/ @osac-project/wg-caas
+/osac-aap/collections/ansible_collections/osac/workflows/playbooks/cluster/ @osac-project/wg-caas
+
+# VMaaS (VM-as-a-Service) working group
+## E2E Tests
+/tests/e2e/vmaas/ @osac-project/wg-vmaas
+## AAP
+/osac-aap/playbook_osac_*_compute_instance.yml @osac-project/wg-vmaas
+/osac-aap/collections/ansible_collections/osac/templates/roles/ocp_virt_vm/ @osac-project/wg-vmaas
+/osac-aap/tests/integration/targets/compute_instance_*/ @osac-project/wg-vmaas
+## Operator
+/osac-operator/config/crd/bases/osac.openshift.io_computeinstances.yaml @osac-project/wg-vmaas
+/osac-operator/internal/controller/computeinstance_*.go @osac-project/wg-vmaas
+/osac-operator/charts/operator-crds/templates/osac.openshift.io_computeinstances.yaml @osac-project/wg-vmaas
+/osac-operator/api/v1alpha1/computeinstance_*.go @osac-project/wg-vmaas
+## Fulfillment Integration
+/fulfillment-service/it/it_compute_instance_*.go @osac-project/wg-vmaas
+/fulfillment-service/internal/cmd/cli/describe/computeinstance/ @osac-project/wg-vmaas
+/fulfillment-service/internal/cmd/cli/create/computeinstance/ @osac-project/wg-vmaas
+/fulfillment-service/internal/cmd/cli/create/computeinstancecatalogitem/ @osac-project/wg-vmaas
+/fulfillment-service/internal/computeinstancespec/ @osac-project/wg-vmaas
+/fulfillment-service/internal/controllers/computeinstance/ @osac-project/wg-vmaas
+/fulfillment-service/internal/servers/*_compute_instance_*.go @osac-project/wg-vmaas
+/fulfillment-service/internal/servers/compute_instances_server.go @osac-project/wg-vmaas
+## VMaaS CI installer values
+/osac-installer/values/vmaas-ci/ @osac-project/wg-vmaas

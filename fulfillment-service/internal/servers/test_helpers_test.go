@@ -76,6 +76,14 @@ func createComputeInstanceInState(
 	if len(hubIDs) > 0 {
 		hubID = hubIDs[0]
 	}
+	status := privatev1.ComputeInstanceStatus_builder{State: state, Hub: hubID}
+	if state == privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_RUNNING {
+		status.InternalIpAddress = "10.0.0.10"
+		status.Conditions = []*privatev1.ComputeInstanceCondition{privatev1.ComputeInstanceCondition_builder{
+			Type:   privatev1.ComputeInstanceConditionType_COMPUTE_INSTANCE_CONDITION_TYPE_READY,
+			Status: privatev1.ConditionStatus_CONDITION_STATUS_TRUE,
+		}.Build()}
+	}
 	resp, err := computeInstanceDao.Create().SetObject(
 		privatev1.ComputeInstance_builder{
 			Metadata: privatev1.Metadata_builder{
@@ -85,10 +93,7 @@ func createComputeInstanceInState(
 			Spec: privatev1.ComputeInstanceSpec_builder{
 				Template: privatev1.ComputeInstanceTemplateReference_builder{Id: "general.small"}.Build(),
 			}.Build(),
-			Status: privatev1.ComputeInstanceStatus_builder{
-				State: state,
-				Hub:   hubID,
-			}.Build(),
+			Status: status.Build(),
 		}.Build(),
 	).Do(ctx)
 	ExpectWithOffset(1, err).ToNot(HaveOccurred())
@@ -119,8 +124,9 @@ func createDiskImageWithLifecycle(
 				Tenant: auth.SharedTenant,
 			}.Build(),
 			Spec: privatev1.DiskImageSpec_builder{
-				Lifecycle:   lifecycle,
-				Deprecation: deprecation,
+				Lifecycle:    lifecycle,
+				Architecture: []privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_AMD64},
+				Deprecation:  deprecation,
 			}.Build(),
 		}.Build(),
 	).Do(ctx)
@@ -283,7 +289,8 @@ func createAvailableDiskImageInTenant(id, name, tenant string) {
 				Tenant: tenant,
 			}.Build(),
 			Spec: privatev1.DiskImageSpec_builder{
-				Lifecycle: privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_AVAILABLE,
+				Lifecycle:    privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_AVAILABLE,
+				Architecture: []privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_AMD64},
 			}.Build(),
 		}.Build(),
 	).Do(ctx)

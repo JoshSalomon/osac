@@ -34,6 +34,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/utils"
+	"github.com/osac-project/osac/fulfillment-service/internal/validation"
 	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
@@ -336,7 +337,7 @@ func (s *PrivateBareMetalInstancesServer) prepareCreate(ctx context.Context, can
 	if err = validatePlatformReference(ref, "bare metal instance type", " in spec.instance_type"); err != nil {
 		return
 	}
-	instanceType, err := resolveAndCanonicalizeReference(ctx, s.instanceTypesDao, candidate.GetMetadata(), ref,
+	instanceType, err := resolveAndCanonicalizeLockedReference(ctx, s.instanceTypesDao, candidate.GetMetadata(), ref,
 		"bare metal instance type", grpccodes.NotFound)
 	if err != nil {
 		return
@@ -351,7 +352,7 @@ func (s *PrivateBareMetalInstancesServer) prepareCreate(ctx context.Context, can
 	hubReferences := make([]networkingHubReference, 0, len(candidate.GetSpec().GetNetworkAttachments())*2)
 	for i, attachment := range candidate.GetSpec().GetNetworkAttachments() {
 		source := fmt.Sprintf(" in spec.network_attachments[%d]", i)
-		subnet, resolveErr := resolveAndCanonicalizeReference(ctx, s.subnetsDao, candidate.GetMetadata(), attachment.GetSubnet(), "subnet", grpccodes.InvalidArgument)
+		subnet, resolveErr := resolveAndCanonicalizeLockedReference(ctx, s.subnetsDao, candidate.GetMetadata(), attachment.GetSubnet(), "subnet", grpccodes.InvalidArgument)
 		if resolveErr != nil {
 			return nil, resolveErr
 		}
@@ -364,7 +365,7 @@ func (s *PrivateBareMetalInstancesServer) prepareCreate(ctx context.Context, can
 			hubID:        subnet.GetStatus().GetHub(),
 		})
 		for _, ref := range attachment.GetSecurityGroups() {
-			group, resolveErr := resolveAndCanonicalizeReference(ctx, s.securityGroupsDao, candidate.GetMetadata(), ref, "security group", grpccodes.InvalidArgument)
+			group, resolveErr := resolveAndCanonicalizeLockedReference(ctx, s.securityGroupsDao, candidate.GetMetadata(), ref, "security group", grpccodes.InvalidArgument)
 			if resolveErr != nil {
 				return nil, resolveErr
 			}
@@ -400,7 +401,14 @@ func (s *PrivateBareMetalInstancesServer) prepareCreate(ctx context.Context, can
 			return nil, err
 		}
 		candidate.GetSpec().SetDiskImage(canonicalDiskImageReference(resolved))
-		return validateResolvedDiskImage(resolved, refKey(ref), "")
+		warnings, err := validateResolvedDiskImage(resolved, refKey(ref), "")
+		if err != nil {
+			return nil, err
+		}
+		if err := validation.ValidateBareMetalDiskImageArchitecture(instanceType, resolved); err != nil {
+			return nil, grpcstatus.Error(grpccodes.InvalidArgument, err.Error())
+		}
+		return warnings, nil
 	}
 
 	return nil, grpcstatus.Errorf(grpccodes.InvalidArgument, "disk_image is mandatory")
@@ -430,14 +438,14 @@ func (s *PrivateBareMetalInstancesServer) resolveCreationSource(ctx context.Cont
 func (s *PrivateBareMetalInstancesServer) Update(ctx context.Context,
 	request *privatev1.BareMetalInstancesUpdateRequest) (response *privatev1.BareMetalInstancesUpdateResponse, err error) {
 	err = s.generic.UpdateWithCandidatePreparation(ctx, request, &response, func(ctx context.Context, current, candidate *privatev1.BareMetalInstance) error {
-		if err := validateBareMetalImmutability(current, candidate, request.GetUpdateMask()); err != nil {
-			return err
-		}
 		if err := s.validateAndResolveUserDataSecret(
 			ctx,
 			candidate.GetSpec(),
-			updateIncludesField(request.GetUpdateMask(), "spec.user_data_secret"),
+			updateIncludesField(request.GetUpdateMask(), "spec.user_data_source"),
 		); err != nil {
+			return err
+		}
+		if err := validateBareMetalImmutability(current, candidate, request.GetUpdateMask()); err != nil {
 			return err
 		}
 		return nil
@@ -450,48 +458,40 @@ func (s *PrivateBareMetalInstancesServer) validateAndResolveUserDataSecret(
 	spec *privatev1.BareMetalInstanceSpec,
 	resolve bool,
 ) error {
-	if spec.HasUserData() && spec.GetUserDataSecret() != nil {
-		return grpcstatus.Errorf(grpccodes.InvalidArgument,
-			"user_data and user_data_secret are mutually exclusive")
-	}
-	if !resolve || spec.GetUserDataSecret() == nil {
+	if !resolve || spec.GetUserDataSource().GetSecret() == nil {
 		return nil
 	}
 	resolved, err := validateUserDataSecret(
-		ctx, s.logger, s.secretsDao, s.secretStore, spec.GetUserDataSecret(),
+		ctx, s.logger, s.secretsDao, s.secretStore, spec.GetUserDataSource().GetSecret(),
 	)
 	if err != nil {
 		return err
 	}
-	spec.SetUserDataSecret(resolved)
+	spec.GetUserDataSource().SetSecret(resolved)
 	return nil
 }
 
 func (s *PrivateBareMetalInstancesServer) Delete(ctx context.Context,
 	request *privatev1.BareMetalInstancesDeleteRequest) (response *privatev1.BareMetalInstancesDeleteResponse, err error) {
 	id := request.GetId()
-	if id != "" {
-		getResponse, getErr := s.generic.dao.Get().SetId(id).Do(ctx)
-		if getErr != nil {
-			var notFoundErr *dao.ErrNotFound
-			if !errors.As(getErr, &notFoundErr) {
-				err = getErr
-				return
-			}
-			s.logger.DebugContext(ctx, "BMI not found during delete, skipping auto-EIP cleanup",
-				slog.String("bmi_id", id))
-		} else if getResponse.GetObject().GetSpec().GetAutoExternalIpAttachment() {
-			s.logger.InfoContext(ctx, "BMI has auto_external_ip_attachment, running cascade cleanup",
-				slog.String("bmi_id", id))
-			err = s.autoCleanupExternalIP(ctx, id)
-			if err != nil {
-				s.logger.ErrorContext(ctx, "Auto-EIP cascade cleanup failed",
-					slog.String("bmi_id", id), slog.Any("error", err))
-				return
-			}
-		} else {
-			s.logger.DebugContext(ctx, "BMI does not have auto_external_ip_attachment",
-				slog.String("bmi_id", id))
+	if id == "" {
+		return nil, grpcstatus.Error(grpccodes.InvalidArgument, "identifier is mandatory")
+	}
+	instance, err := lockLifecycleResource(ctx, s.generic.dao, id, "BareMetalInstance")
+	if err != nil {
+		return
+	}
+	if err = s.lifecycle.rejectManualAttachmentDelete(ctx, "BareMetalInstance", id, instance.GetMetadata()); err != nil {
+		return
+	}
+	if instance.GetSpec().GetAutoExternalIpAttachment() {
+		s.logger.InfoContext(ctx, "BMI has auto_external_ip_attachment, running cascade cleanup",
+			slog.String("bmi_id", id))
+		err = s.autoCleanupExternalIP(ctx, id)
+		if err != nil {
+			s.logger.ErrorContext(ctx, "Auto-EIP cascade cleanup failed",
+				slog.String("bmi_id", id), slog.Any("error", err))
+			return
 		}
 	}
 	err = s.generic.Delete(ctx, request, &response)
@@ -499,10 +499,7 @@ func (s *PrivateBareMetalInstancesServer) Delete(ctx context.Context,
 }
 
 func (s *PrivateBareMetalInstancesServer) autoCleanupExternalIP(ctx context.Context, bmiID string) error {
-	filter := fmt.Sprintf(
-		"this.metadata.labels['%s'] == '%s'",
-		autoCreatedForLabel, bmiID,
-	)
+	filter := autoCreatedExternalIPAttachmentFilter(bmiID)
 	s.logger.InfoContext(ctx, "Auto-EIP cleanup: listing attachments",
 		slog.String("bmi_id", bmiID), slog.String("filter", filter))
 
@@ -536,9 +533,8 @@ func (s *PrivateBareMetalInstancesServer) autoCleanupExternalIP(ctx context.Cont
 		}
 	}
 
-	if len(items) == 0 {
-		s.logger.WarnContext(ctx, "Auto-EIP cleanup: no attachments found for BMI",
-			slog.String("bmi_id", bmiID), slog.String("label", autoCreatedForLabel))
+	if err := s.lifecycle.deleteAutoCreatedExternalIPs(ctx, bmiID); err != nil {
+		return fmt.Errorf("auto_external_ip_attachment cleanup: %w", err)
 	}
 
 	return nil
@@ -566,16 +562,16 @@ func (s *PrivateBareMetalInstancesServer) validateSpec(bmi *privatev1.BareMetalI
 		}
 	}
 
-	if spec.HasUserData() {
-		if err := validateBareMetalUserData([]byte(spec.GetUserData())); err != nil {
-			return grpcstatus.Errorf(grpccodes.InvalidArgument, "spec.user_data: %s", err)
+	if spec.GetUserDataSource().HasInline() {
+		if err := validateBareMetalUserData([]byte(spec.GetUserDataSource().GetInline())); err != nil {
+			return grpcstatus.Errorf(grpccodes.InvalidArgument, "spec.user_data_source.inline: %s", err)
 		}
 	}
 
 	// If none of the authentication inputs are set, the server cannot be accessed after deployment.
-	if spec.GetSshPublicKey() == "" && spec.GetUserData() == "" && spec.GetUserDataSecret() == nil {
+	if spec.GetSshPublicKey() == "" && spec.GetUserDataSource().GetInline() == "" && spec.GetUserDataSource().GetSecret() == nil {
 		return grpcstatus.Error(grpccodes.InvalidArgument,
-			"at least one authentication method must be provided: spec.ssh_public_key, spec.user_data or spec.user_data_secret")
+			"at least one authentication method must be provided: spec.ssh_public_key, spec.user_data_source.inline or spec.user_data_source.secret")
 	}
 
 	return nil
@@ -826,7 +822,7 @@ func (s *PrivateBareMetalInstancesServer) applyBareMetalTemplate(bmi *privatev1.
 	return nil
 }
 
-// validateBareMetalImmutability ensures template, catalog_item, instance_type, disk_image, ssh_public_key, user_data, template_parameters,
+// validateBareMetalImmutability ensures template, catalog_item, instance_type, disk_image, ssh_public_key, user_data_source.inline, template_parameters,
 // auto_external_ip_attachment, and network_attachments cannot be changed after creation.
 func validateBareMetalImmutability(
 	current, candidate *privatev1.BareMetalInstance,
@@ -837,8 +833,7 @@ func validateBareMetalImmutability(
 	updatingInstanceType := updateIncludesField(mask, "spec.instance_type")
 	updatingDiskImage := updateIncludesField(mask, "spec.disk_image")
 	updatingSshKey := updateIncludesField(mask, "spec.ssh_public_key")
-	updatingUserData := updateIncludesField(mask, "spec.user_data")
-	updatingUserDataSecret := updateIncludesField(mask, "spec.user_data_secret")
+	updatingUserDataSource := updateIncludesField(mask, "spec.user_data_source")
 	updatingTemplateParams := updateIncludesField(mask, "spec.template_parameters")
 	updatingAutoExternalIP := updateIncludesField(mask, "spec.auto_external_ip_attachment")
 	updatingNetworkAttachments := updateIncludesField(mask, "spec.network_attachments")
@@ -878,7 +873,7 @@ func validateBareMetalImmutability(
 	}
 
 	if err := validateBareMetalUserDataImmutability(
-		existingSpec, newSpec, updatingUserData, updatingUserDataSecret,
+		existingSpec, newSpec, updatingUserDataSource,
 	); err != nil {
 		return err
 	}
@@ -909,20 +904,18 @@ func validateBareMetalImmutability(
 
 func validateBareMetalUserDataImmutability(
 	existingSpec, newSpec *privatev1.BareMetalInstanceSpec,
-	updatingUserData, updatingUserDataSecret bool,
+	updatingUserDataSource bool,
 ) error {
-	isAtomicMigration := updatingUserData && updatingUserDataSecret &&
-		existingSpec.HasUserData() && !newSpec.HasUserData() &&
-		existingSpec.GetUserDataSecret() == nil && newSpec.GetUserDataSecret() != nil
-	if updatingUserData && existingSpec.GetUserData() != newSpec.GetUserData() && !isAtomicMigration {
+	isAtomicMigration := updatingUserDataSource &&
+		existingSpec.GetUserDataSource().HasInline() && newSpec.GetUserDataSource().GetSecret() != nil
+	if updatingUserDataSource && existingSpec.GetUserDataSource().GetInline() != newSpec.GetUserDataSource().GetInline() && !isAtomicMigration {
 		return grpcstatus.Errorf(grpccodes.InvalidArgument,
-			"cannot change spec.user_data: user_data is immutable after creation")
+			"cannot change spec.user_data_source.inline: user_data_source.inline is immutable after creation")
 	}
-	if updatingUserDataSecret && existingSpec.GetUserDataSecret() != nil &&
-		!proto.Equal(existingSpec.GetUserDataSecret(), newSpec.GetUserDataSecret()) &&
-		!isAtomicMigration {
+	if updatingUserDataSource && existingSpec.GetUserDataSource().GetSecret() != nil &&
+		!sameSecretReference(existingSpec.GetUserDataSource().GetSecret(), newSpec.GetUserDataSource().GetSecret()) {
 		return grpcstatus.Errorf(grpccodes.InvalidArgument,
-			"cannot change spec.user_data_secret: user_data_secret is immutable after creation")
+			"cannot change spec.user_data_source.secret: user_data_source.secret is immutable after creation")
 	}
 	return nil
 }
@@ -1116,18 +1109,21 @@ func (s *PrivateBareMetalInstancesServer) autoProvisionExternalIP(
 		shortID = shortID[:8]
 	}
 
+	eipLabels := map[string]string{
+		autoCreatedLabel:     "true",
+		autoCreatedForLabel:  bmiID,
+		autoCreatedKindLabel: "bare_metal_instance",
+	}
 	eip := privatev1.ExternalIP_builder{
 		Metadata: privatev1.Metadata_builder{
 			Name:   fmt.Sprintf("auto-eip-%s", shortID),
 			Tenant: tenant,
-			Labels: map[string]string{
-				autoCreatedLabel:    "true",
-				autoCreatedForLabel: bmiID,
-			},
+			Labels: eipLabels,
 			Annotations: map[string]string{
+				tenantAnnotation:         tenant,
 				ownerReferenceAnnotation: bmiID,
 			},
-			Creator: "system",
+			Creator: systemCreator,
 		}.Build(),
 		Spec: privatev1.ExternalIPSpec_builder{
 			Pool: privatev1.ExternalIPPoolReference_builder{Id: pool.GetId()}.Build(),
@@ -1137,47 +1133,14 @@ func (s *PrivateBareMetalInstancesServer) autoProvisionExternalIP(
 		}.Build(),
 	}.Build()
 
-	eipResp, err := s.externalIPDao.Create().SetObject(eip).Do(ctx)
+	_, err = s.externalIPDao.Create().SetObject(eip).Do(ctx)
 	if err != nil {
 		return fmt.Errorf("auto_external_ip_attachment: failed to create ExternalIP: %w", err)
-	}
-	eipID := eipResp.GetObject().GetId()
-
-	err = s.lifecycle.lockNewBareMetalAttachmentReferences(ctx, eipID, bmiID)
-	if err != nil {
-		return fmt.Errorf("auto_external_ip_attachment: failed to lock attachment references: %w", err)
 	}
 
 	err = UpdatePoolCapacity(ctx, s.externalIPPoolDao, pool.GetId(), 1)
 	if err != nil {
 		return grpcstatus.Errorf(grpccodes.FailedPrecondition, "auto_external_ip_attachment: %s", err)
-	}
-
-	attachment := privatev1.ExternalIPAttachment_builder{
-		Metadata: privatev1.Metadata_builder{
-			Name:   fmt.Sprintf("auto-eipa-%s", shortID),
-			Tenant: tenant,
-			Labels: map[string]string{
-				autoCreatedLabel:    "true",
-				autoCreatedForLabel: bmiID,
-			},
-			Annotations: map[string]string{
-				ownerReferenceAnnotation: bmiID,
-			},
-			Creator: "system",
-		}.Build(),
-		Spec: privatev1.ExternalIPAttachmentSpec_builder{
-			ExternalIp:        privatev1.ExternalIPLocalReference_builder{Id: eipID}.Build(),
-			BaremetalInstance: privatev1.BareMetalInstanceLocalReference_builder{Id: bmiID}.Build(),
-		}.Build(),
-		Status: privatev1.ExternalIPAttachmentStatus_builder{
-			State: privatev1.ExternalIPAttachmentState_EXTERNAL_IP_ATTACHMENT_STATE_PENDING,
-		}.Build(),
-	}.Build()
-
-	_, err = s.externalIPAttachmentDao.Create().SetObject(attachment).Do(ctx)
-	if err != nil {
-		return fmt.Errorf("auto_external_ip_attachment: failed to create ExternalIPAttachment: %w", err)
 	}
 
 	return nil

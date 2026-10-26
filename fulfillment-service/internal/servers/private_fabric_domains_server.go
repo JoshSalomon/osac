@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
@@ -30,6 +31,7 @@ type PrivateFabricDomainsServerBuilder struct {
 	attributionLogic  auth.AttributionLogic
 	tenancyLogic      auth.TenancyLogic
 	metricsRegisterer prometheus.Registerer
+	filterDesc        protoreflect.MessageDescriptor
 }
 
 var _ privatev1.FabricDomainsServer = (*PrivateFabricDomainsServer)(nil)
@@ -65,6 +67,13 @@ func (b *PrivateFabricDomainsServerBuilder) SetMetricsRegisterer(value prometheu
 	return b
 }
 
+// SetFilterDesc sets the protobuf message descriptor used to validate and translate CEL filter
+// expressions. This is optional. When unset, the descriptor of the private FabricDomain type is used.
+func (b *PrivateFabricDomainsServerBuilder) SetFilterDesc(value protoreflect.MessageDescriptor) *PrivateFabricDomainsServerBuilder {
+	b.filterDesc = value
+	return b
+}
+
 func (b *PrivateFabricDomainsServerBuilder) Build() (result *PrivateFabricDomainsServer, err error) {
 	if b.logger == nil {
 		return nil, errors.New("logger is mandatory")
@@ -79,6 +88,7 @@ func (b *PrivateFabricDomainsServerBuilder) Build() (result *PrivateFabricDomain
 		SetAttributionLogic(b.attributionLogic).
 		SetTenancyLogic(b.tenancyLogic).
 		SetMetricsRegisterer(b.metricsRegisterer).
+		SetFilterDesc(b.filterDesc).
 		Build()
 	if err != nil {
 		return nil, err
@@ -235,15 +245,28 @@ func (s *PrivateFabricDomainsServer) validateFabricDomain(ctx context.Context, o
 	if vn.GetMetadata().HasDeletionTimestamp() {
 		return grpcstatus.Error(grpccodes.FailedPrecondition, "VirtualNetwork is being deleted")
 	}
+	if vn.GetStatus().GetState() != privatev1.VirtualNetworkState_VIRTUAL_NETWORK_STATE_READY {
+		return grpcstatus.Errorf(grpccodes.FailedPrecondition,
+			"VirtualNetwork '%s' must be READY (current state: %s)",
+			spec.GetVirtualNetwork(), vn.GetStatus().GetState().String())
+	}
 	networkClassID := vn.GetSpec().GetNetworkClass().GetId()
 	if networkClassID == "" {
 		return grpcstatus.Error(grpccodes.FailedPrecondition, "VirtualNetwork has no NetworkClass")
 	}
-	ncResponse, err := s.networkClassDao.Get().SetId(networkClassID).Do(ctx)
+	ncResponse, err := s.networkClassDao.Get().SetId(networkClassID).SetLock(true).Do(ctx)
 	if err != nil {
-		return err
+		return translateLifecycleError(err)
 	}
 	nc := ncResponse.GetObject()
+	if nc.GetMetadata().HasDeletionTimestamp() {
+		return grpcstatus.Errorf(grpccodes.FailedPrecondition,
+			"NetworkClass '%s' is being deleted", networkClassID)
+	}
+	if nc.GetStatus().GetState() != privatev1.NetworkClassState_NETWORK_CLASS_STATE_READY {
+		return grpcstatus.Errorf(grpccodes.FailedPrecondition,
+			"NetworkClass '%s' must be READY (current state: %s)", networkClassID, nc.GetStatus().GetState().String())
+	}
 	if !nc.GetCapabilities().GetSupportsEastWestEthernet() {
 		return grpcstatus.Error(grpccodes.InvalidArgument, "type does not match NetworkClass capability")
 	}

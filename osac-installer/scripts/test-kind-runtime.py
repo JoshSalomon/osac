@@ -597,23 +597,71 @@ create_cluster osac-dev config.yaml {shlex.quote(str(kubeconfig))}
         self.assertIn('KIND_PROFILE="dev-full"', result.stdout)
         self.assertNotIn("kind load docker-image", result.stdout)
 
+    def test_fulfillment_reports_are_opt_in_and_use_the_configured_directory(self):
+        checkout = self.directory / "checkout"
+        installer = checkout / "osac-installer"
+        module = checkout / "fulfillment-service"
+        installer.mkdir(parents=True)
+        (module / "it").mkdir(parents=True)
+        shutil.copy(INSTALLER / "Makefile", installer / "Makefile")
+        env = {key: value for key, value in self.env.items() if key != "FULFILLMENT_IT_REPORT_DIR"}
+        phases = ["service-only", "manager-capability", "manager-readiness", "bmaas-disabled"]
+        cases = [("default", None), ("disabled", ""), ("relative", "../local-reports"),
+                 ("absolute", str(module / "logs/timings"))]
+        for name, directory in cases:
+            with self.subTest(name=name):
+                args = ["make", "--no-print-directory", "-n", "-C", str(installer), "test",
+                        "PLATFORM=kind", "PROFILE=dev", "NS=osac", "SUITE=fulfillment", "MAKE=true"]
+                case_env = env.copy()
+                if name == "absolute":
+                    case_env["FULFILLMENT_IT_REPORT_DIR"] = directory
+                elif directory is not None:
+                    args.append(f"FULFILLMENT_IT_REPORT_DIR={directory}")
+                result = subprocess.run(args, env=case_env, text=True, capture_output=True, timeout=15)
+                self.assert_success(result)
+                commands = [shlex.split(line) for line in result.stdout.splitlines() if "ginkgo run " in line]
+                self.assertEqual(len(commands), 4)
+                reports = [[word.split("=", 1)[1] for word in command
+                            if word.startswith("--json-report=")] for command in commands]
+                cleanup = [word for line in result.stdout.splitlines() if line.startswith("rm -f ")
+                           for word in shlex.split(line)[2:] if word.endswith(".json")]
+                if not directory:
+                    self.assertEqual(reports, [[], [], [], []])
+                    self.assertEqual(cleanup, [])
+                    continue
+                report_dir = (installer / directory).resolve()
+                expected = [report_dir / f"{phase}.json" for phase in phases]
+                self.assertTrue(all(Path(path).is_absolute() for paths in reports for path in paths))
+                self.assertEqual([[Path(path).resolve() for path in paths] for paths in reports],
+                                 [[path] for path in expected])
+                self.assertEqual([Path(path).resolve() for path in cleanup], expected)
+
     def prepare_helm_dependencies(self):
         installer = self.directory / "installer"
         infra = installer / "charts/osac-infra"
         infra.mkdir(parents=True)
         shutil.copy(INSTALLER / "Makefile", installer / "Makefile")
         shutil.copy(INSTALLER / "charts/osac-infra/Chart.yaml", infra / "Chart.yaml")
-        version = next(line.split()[1] for line in (infra / "Chart.yaml").read_text().splitlines()
-                       if line.startswith("    version:"))
-        self.archive = infra / "charts" / f"topolvm-{version}.tgz"
-        self.env["MOCK_TOPOLVM_ARCHIVE"] = str(self.archive)
+        # One pinned archive per dependency declared in Chart.yaml; the Makefile
+        # derives its build targets from the same list.
+        deps = []
+        for line in (infra / "Chart.yaml").read_text().splitlines():
+            if line.startswith("  - name:"):
+                deps.append({"name": line.split()[2]})
+            elif line.startswith("    version:") and deps and "version" not in deps[-1]:
+                deps[-1]["version"] = line.split()[1].strip('"')
+        self.archives = [infra / "charts" / f"{d['name']}-{d['version']}.tgz" for d in deps]
+        self.env["MOCK_HELM_ARCHIVES"] = " ".join(str(a) for a in self.archives)
+        self.archive = self.archives[0]
         self.write_command("helm", """
 if [[ "$*" == 'version --short' ]]; then echo v3.19.0; exit 0; fi
 printf 'helm %s\n' "$*" >> "$MOCK_LOG"
 if [[ "$*" == "${MOCK_HELM_FAILURE:-}" ]]; then exit 1; fi
 if [[ "$*" == 'dependency build charts/osac-infra' ]]; then
-  mkdir -p "$(dirname "$MOCK_TOPOLVM_ARCHIVE")"
-  touch "$MOCK_TOPOLVM_ARCHIVE"
+  for archive in $MOCK_HELM_ARCHIVES; do
+    mkdir -p "$(dirname "$archive")"
+    touch "$archive"
+  done
 fi
 """)
         return installer
@@ -632,9 +680,10 @@ fi
 
     def test_helm_lint_downloads_missing_topolvm_and_reuses_it(self):
         installer = self.prepare_helm_dependencies()
-        # A stale archive must not satisfy the version pinned in Chart.yaml.
+        # Stale archives must not satisfy the versions pinned in Chart.yaml.
         self.archive.parent.mkdir()
-        (self.archive.parent / "topolvm-0.0.0.tgz").touch()
+        for archive in self.archives:
+            (archive.parent / f"{archive.name.rsplit('-', 1)[0]}-0.0.0.tgz").touch()
         for _ in range(2):
             result = subprocess.run(
                 ["make", "--no-print-directory", "-C", str(installer),
@@ -683,6 +732,7 @@ fi
                     self.assertEqual(args[3], release)
                     if release == "osac-devstack":
                         self.assertNotIn("--force-conflicts", args)
+                        self.assertIn("ui.enabled=true", args)
                         if version.startswith("v4."):
                             self.assertIn("--server-side=false", args)
                             self.assertEqual(args[args.index("--post-renderer") + 1], "osac-dev-full-awx-image")

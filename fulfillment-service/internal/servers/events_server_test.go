@@ -415,6 +415,54 @@ var _ = Describe("Events server visibility", Ordered, func() {
 		Consistently(collector.Events, time.Second).Should(BeEmpty())
 	})
 
+	It("evaluates filters against the public metadata projection", func() {
+		server, client := startServer(makeTenancy("tenant-a"))
+		watchCtx, cancel := context.WithCancel(context.Background())
+		DeferCleanup(cancel)
+		stream, err := client.Watch(watchCtx, publicv1.EventsWatchRequest_builder{
+			Filter: new("event.cluster.metadata.labels == {'ordinary': 'visible'}"),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		collector := &eventsCollector{}
+		collector.Collect(stream)
+		Eventually(server.Subscriptions, 10*time.Second).Should(BeNumerically(">=", 1))
+
+		privateEvent := privatev1.Event_builder{
+			Id:   uuid.New(),
+			Type: privatev1.EventType_EVENT_TYPE_OBJECT_CREATED,
+			Cluster: privatev1.Cluster_builder{
+				Id: uuid.New(),
+				Metadata: privatev1.Metadata_builder{
+					Tenant: "tenant-a",
+					Labels: map[string]string{
+						"admin.osac.openshift.io/managed": "system",
+						"ordinary":                        "visible",
+					},
+				}.Build(),
+			}.Build(),
+		}.Build()
+		sendEvent(privateEvent)
+		changedPrivateEvent := proto.Clone(privateEvent).(*privatev1.Event)
+		changedPrivateEvent.SetId(uuid.New())
+		changedPrivateEvent.GetCluster().GetMetadata().SetLabels(map[string]string{
+			"admin.osac.openshift.io/managed": "changed",
+			"ordinary":                        "visible",
+		})
+		sendEvent(changedPrivateEvent)
+
+		Eventually(collector.Events, 5*time.Second).Should(HaveLen(2))
+		for _, publicEvent := range collector.Events() {
+			publicLabels := publicEvent.GetCluster().GetMetadata().GetLabels()
+			Expect(publicLabels).To(Equal(map[string]string{"ordinary": "visible"}))
+		}
+		Expect(privateEvent.GetCluster().GetMetadata().GetLabels()).To(HaveKeyWithValue(
+			"admin.osac.openshift.io/managed", "system",
+		))
+		Expect(changedPrivateEvent.GetCluster().GetMetadata().GetLabels()).To(HaveKeyWithValue(
+			"admin.osac.openshift.io/managed", "changed",
+		))
+	})
+
 	It("Delivers event with cluster payload", func() {
 		// Send an event with cluster payload:
 		server, client := startServer(makeTenancy("tenant-a"))
@@ -508,5 +556,33 @@ var _ = Describe("Events server visibility", Ordered, func() {
 		status, ok := grpcstatus.FromError(err)
 		Expect(ok).To(BeTrue())
 		Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
+	})
+
+	It("rejects reserved metadata references when a public watch is opened", func() {
+		_, client := startServer(makeTenancy("tenant-a"))
+		watchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		watchStream, err := client.Watch(watchCtx, publicv1.EventsWatchRequest_builder{
+			Filter: new(`event.cluster.metadata.labels['admin.osac.openshift.io/managed'] == 'system'`),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = watchStream.Recv()
+		Expect(err).To(HaveOccurred())
+		status, ok := grpcstatus.FromError(err)
+		Expect(ok).To(BeTrue())
+		Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
+	})
+
+	It("rejects reserved label and annotation references throughout watch predicates", func() {
+		server, _ := startServer(makeTenancy("tenant-a"))
+		for _, filter := range []string{
+			`event.cluster.metadata.labels['admin.osac.openshift.io/managed'] == 'system'`,
+			`'controller.admin.osac.openshift.io/managed' in event.cluster.metadata.annotations`,
+			`event.id == 'known' && event.cluster.metadata.annotations['admin.osac.openshift.io/managed'] != 'system'`,
+		} {
+			_, err := server.compileFilter(context.Background(), filter)
+			Expect(err).To(MatchError(ContainSubstring("reserved metadata key")), "filter %q", filter)
+		}
 	})
 })

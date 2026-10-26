@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import {
   Card,
   CardBody,
@@ -12,8 +13,8 @@ import type { ComputeInstance } from '@osac/types';
 
 import { useTranslation } from '../../../hooks/useTranslation';
 import { displayValue } from '../../../utils/detailFormatters';
-import { formatBootDiskSizeForReview } from '../../catalogProvision/wizard/catalogOverlay';
 import { Timestamp } from '../../Primitives/Timestamp';
+import { formatBootDiskSizeForReview } from '../../ProvisioningWizard/reviewFormatters';
 
 interface Props {
   vm: ComputeInstance;
@@ -23,6 +24,9 @@ const VmDetailsCard = ({ vm }: Props) => {
   const { t } = useTranslation();
   const catalogItem = vm.spec?.catalogItem;
   const instanceType = vm.spec?.instanceType;
+  const sshKey = vm.spec?.sshKey;
+  const sshKeyLabel = sshKey?.name || sshKey?.id;
+  const sshKeyDetailsUrl = sshKey?.id ? `/secrets/${sshKey.id}` : undefined;
 
   return (
     <Card isFullHeight>
@@ -44,7 +48,11 @@ const VmDetailsCard = ({ vm }: Props) => {
           <DescriptionListGroup>
             <DescriptionListTerm>{t('SSH public key')}</DescriptionListTerm>
             <DescriptionListDescription>
-              {displayValue(vm.spec?.sshKey?.name)}
+              {sshKeyDetailsUrl && sshKeyLabel ? (
+                <Link to={sshKeyDetailsUrl}>{sshKeyLabel}</Link>
+              ) : (
+                displayValue(sshKeyLabel)
+              )}
             </DescriptionListDescription>
           </DescriptionListGroup>
           <DescriptionListGroup>
@@ -77,12 +85,6 @@ const VmDetailsCard = ({ vm }: Props) => {
             <DescriptionListTerm>{t('Created')}</DescriptionListTerm>
             <DescriptionListDescription>
               <Timestamp value={vm.metadata?.creationTimestamp} />
-            </DescriptionListDescription>
-          </DescriptionListGroup>
-          <DescriptionListGroup>
-            <DescriptionListTerm>{t('Creator')}</DescriptionListTerm>
-            <DescriptionListDescription>
-              {displayValue(vm.metadata?.creator)}
             </DescriptionListDescription>
           </DescriptionListGroup>
         </DescriptionList>

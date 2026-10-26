@@ -598,7 +598,7 @@ class GRPCClient:
         cores: int = 4,
         threads_per_core: int = 1,
         memory_gb: int = 16,
-        architecture: str = "ARCHITECTURE_AMD64",
+        architecture: str = "amd64",
         network_ports: list[dict[str, Any]] | None = None,
         host_label_selector: dict[str, str] | None = None,
         description: str = "CI bare-metal worker profile",
@@ -634,7 +634,7 @@ class GRPCClient:
         cores: int = 4,
         threads_per_core: int = 1,
         memory_gb: int = 16,
-        architecture: str = "ARCHITECTURE_AMD64",
+        architecture: str = "amd64",
         network_ports: list[dict[str, Any]] | None = None,
         host_label_selector: dict[str, str] | None = None,
         description: str = "CI bare-metal worker profile",
@@ -703,7 +703,7 @@ class GRPCClient:
             # field in proto, but the JSON mapping accepts it for name lookup.
             spec["instance_type"] = {"name": instance_type, "shared": True}
         if user_data:
-            spec["user_data"] = user_data
+            spec["user_data_source"] = {"inline": user_data}
         try:
             response: dict[str, Any] = self.call(
                 service=f"{api}.BareMetalInstances/Create",
@@ -755,7 +755,7 @@ class GRPCClient:
                     "metadata": {"name": name, "tenant": "shared"},
                     "spec": {
                         "hardware": {
-                            "cpu": {"cores": 4, "architecture": "x86_64", "threads_per_core": 2},
+                            "cpu": {"cores": 4, "architecture": "amd64", "threads_per_core": 2},
                             "memory": {"total_gb": 8},
                             "network_ports": [
                                 {"name": fabric_port, "role": "fabric", "type": "Ethernet", "speed": "10Gbps"}

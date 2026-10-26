@@ -19,6 +19,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -82,6 +83,7 @@ type function struct {
 	logger                *slog.Logger
 	hubCache              controllers.HubCache
 	networkingHubReader   controllers.NetworkingHubReader
+	networkingCleanup     controllers.WorkloadNetworkingCleanup
 	clustersClient        privatev1.ClustersClient
 	hubsClient            privatev1.HubsClient
 	clusterVersionsClient privatev1.ClusterVersionsClient
@@ -139,6 +141,7 @@ func (b *FunctionBuilder) Build() (result controllers.ReconcilerFunction[*privat
 	// Create and populate the object:
 	object := &function{
 		logger:                b.logger,
+		networkingCleanup:     controllers.NewWorkloadNetworkingCleanup(b.connection),
 		clustersClient:        privatev1.NewClustersClient(b.connection),
 		hubsClient:            privatev1.NewHubsClient(b.connection),
 		clusterVersionsClient: privatev1.NewClusterVersionsClient(b.connection),
@@ -173,9 +176,11 @@ func (r *function) run(ctx context.Context, cluster *privatev1.Cluster) error {
 	if err != nil {
 		handled, retry := controllers.HandleResourceNetworkingHubResolutionError(err, t.setPending, t.setFailed)
 		if !handled {
-			return err
-		}
-		if retry {
+			if !controllers.IsRequeueable(err) {
+				return err
+			}
+			hubResolutionRetryErr = err
+		} else if retry {
 			hubResolutionRetryErr = err
 		}
 		err = nil
@@ -300,6 +305,9 @@ func (t *task) update(ctx context.Context) error {
 		orderAnnotations := map[string]string{
 			annotations.Tenant: t.cluster.GetMetadata().GetTenant(),
 		}
+		if err := setUpgradeAttemptAnnotations(orderAnnotations, t.cluster.GetSpec()); err != nil {
+			return err
+		}
 		object := &osacv1alpha1.ClusterOrder{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace:    t.hubNamespace,
@@ -329,6 +337,12 @@ func (t *task) update(ctx context.Context) error {
 		spec.NetworkAttachment = object.Spec.NetworkAttachment
 		update := object.DeepCopy()
 		update.Spec = spec
+		if update.Annotations == nil {
+			update.Annotations = map[string]string{}
+		}
+		if err := setUpgradeAttemptAnnotations(update.Annotations, t.cluster.GetSpec()); err != nil {
+			return err
+		}
 		err = t.hubClient.Patch(ctx, update, clnt.MergeFrom(object))
 		if err != nil {
 			return controllers.HandleK8sWriteError(ctx, t.r.logger, err, t.setFailed)
@@ -351,6 +365,22 @@ func (t *task) update(ctx context.Context) error {
 	}
 
 	return err
+}
+
+func setUpgradeAttemptAnnotations(values map[string]string, spec *privatev1.ClusterSpec) error {
+	delete(values, osacv1alpha1.UpgradeAttemptIDsAnnotation)
+	ids := osacv1alpha1.ClusterOrderUpgradeAttemptIDs{
+		ControlPlane: spec.GetControlPlaneAttemptId(),
+		NodeSets:     spec.GetNodeSetAttemptIds(),
+	}
+	if ids.ControlPlane != "" || len(ids.NodeSets) > 0 {
+		encoded, err := json.Marshal(ids)
+		if err != nil {
+			return err
+		}
+		values[osacv1alpha1.UpgradeAttemptIDsAnnotation] = string(encoded)
+	}
+	return nil
 }
 
 func (t *task) setDefaults() {
@@ -596,6 +626,9 @@ func (t *task) delete(ctx context.Context) (err error) {
 	// No hub was assigned, so no ClusterOrder or hub secrets could have been created.
 	t.hubId = t.cluster.GetStatus().GetHub()
 	if t.hubId == "" {
+		if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.cluster.GetId()); err != nil {
+			return err
+		}
 		t.removeFinalizer()
 		return
 	}
@@ -604,6 +637,9 @@ func (t *task) delete(ctx context.Context) (err error) {
 	if err != nil {
 		// Check if the hub has been decommissioned (deleted from database)
 		if errors.Is(err, controllers.ErrHubNotFound) {
+			if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.cluster.GetId()); err != nil {
+				return err
+			}
 			if err = t.deleteClusterSecrets(ctx); err != nil {
 				return err
 			}
@@ -625,6 +661,9 @@ func (t *task) delete(ctx context.Context) (err error) {
 			"Cluster order doesn't exist",
 			slog.String("id", t.cluster.GetId()),
 		)
+		if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.cluster.GetId()); err != nil {
+			return err
+		}
 		if err = t.deleteClusterSecrets(ctx); err != nil {
 			return err
 		}
@@ -650,6 +689,9 @@ func (t *task) delete(ctx context.Context) (err error) {
 		return nil
 	}
 
+	if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.cluster.GetId()); err != nil {
+		return err
+	}
 	if err = t.deleteClusterSecrets(ctx); err != nil {
 		return err
 	}
@@ -742,6 +784,10 @@ func (t *task) getKubeObject(ctx context.Context) (result *osacv1alpha1.ClusterO
 func (t *task) setFailed(err error) {
 	if !t.cluster.HasStatus() {
 		t.cluster.SetStatus(&privatev1.ClusterStatus{})
+	}
+	if t.cluster.GetStatus().GetState() != privatev1.ClusterState_CLUSTER_STATE_FAILED ||
+		t.cluster.GetStatus().GetStateTransitionTime() == nil {
+		t.cluster.GetStatus().SetStateTransitionTime(timestamppb.Now())
 	}
 	t.cluster.GetStatus().SetState(privatev1.ClusterState_CLUSTER_STATE_FAILED)
 	t.updateCondition(

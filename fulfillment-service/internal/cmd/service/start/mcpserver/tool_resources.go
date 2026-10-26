@@ -16,6 +16,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -36,6 +37,8 @@ const (
 	ResourceTypeSubnet                     ResourceType = "subnet"
 	ResourceTypeSecurityGroup              ResourceType = "security_group"
 	ResourceTypeComputeInstance            ResourceType = "compute_instance"
+	ResourceTypeProject                    ResourceType = "project"
+	ResourceTypeSecretReference            ResourceType = "secret_reference"
 )
 
 type ListResourcesInput struct {
@@ -51,6 +54,7 @@ type ResourceSummary struct {
 	Title       string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
 	State       string `json:"state,omitempty"`
+	Type        string `json:"type,omitempty"`
 }
 
 type ListResourcesOutput struct {
@@ -75,11 +79,11 @@ func handleListResources(resources resourceRegistry) mcp.ToolHandlerFor[ListReso
 	) (*mcp.CallToolResult, ListResourcesOutput, error) {
 		page, err := resourcePage(input)
 		if err != nil {
-			return nil, ListResourcesOutput{}, err
+			return nil, ListResourcesOutput{}, safeInvalidRequestError(err)
 		}
 		operations, ok := resources[input.ResourceType]
 		if !ok {
-			return nil, ListResourcesOutput{}, unsupportedResourceTypeError(input.ResourceType)
+			return nil, ListResourcesOutput{}, safeInvalidRequestError(unsupportedResourceTypeError(input.ResourceType))
 		}
 		ctx, cancel := toolCallContext(ctx)
 		defer cancel()
@@ -101,7 +105,15 @@ func handleGetResource(resources resourceRegistry) mcp.ToolHandlerFor[GetResourc
 	) (*mcp.CallToolResult, GetResourceOutput, error) {
 		operations, ok := resources[input.ResourceType]
 		if !ok {
-			return nil, GetResourceOutput{}, unsupportedResourceTypeError(input.ResourceType)
+			return nil, GetResourceOutput{}, safeInvalidRequestError(unsupportedResourceTypeError(input.ResourceType))
+		}
+		if strings.TrimSpace(input.ID) == "" {
+			return nil, GetResourceOutput{}, safeInvalidRequestError(errors.New("id must not be empty"))
+		}
+		if operations.get == nil {
+			return nil, GetResourceOutput{}, safeInvalidRequestError(fmt.Errorf(
+				"get_resource does not support %s", input.ResourceType,
+			))
 		}
 		ctx, cancel := toolCallContext(ctx)
 		defer cancel()
@@ -115,20 +127,30 @@ func handleGetResource(resources resourceRegistry) mcp.ToolHandlerFor[GetResourc
 		}
 		resource, err := messageToMap(message)
 		if err != nil {
-			return nil, GetResourceOutput{}, fmt.Errorf("failed to encode %s: %w", operations.label, err)
+			return nil, GetResourceOutput{}, safePublicAPIError(fmt.Errorf("failed to encode %s: %w", operations.label, err))
 		}
 		switch input.ResourceType {
 		case ResourceTypeComputeInstance:
-			if spec, ok := resource["spec"].(map[string]any); ok {
-				delete(spec, "userData")
+			if spec, ok := resource["spec"].(map[string]any); ok && hasInlineUserDataSource(spec["userDataSource"]) {
+				delete(spec, "userDataSource")
 			}
 		case ResourceTypeComputeInstanceCatalogItem:
 			if fields, ok := resource["fields"].(map[string]any); ok {
-				delete(fields, "userData")
+				policy, _ := fields["userDataSource"].(map[string]any)
+				editable, _ := policy["editable"].(map[string]any)
+				if hasInlineUserDataSource(policy["locked"]) || hasInlineUserDataSource(editable["defaultValue"]) {
+					delete(fields, "userDataSource")
+				}
 			}
 		}
 		return nil, GetResourceOutput{Resource: resource}, nil
 	}
+}
+
+func hasInlineUserDataSource(value any) bool {
+	source, _ := value.(map[string]any)
+	_, inline := source["inline"]
+	return inline
 }
 
 const (

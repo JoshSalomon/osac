@@ -250,40 +250,41 @@ func cleanupComputeInstanceFixture(
 			})
 	}
 	if securityGroupID != "" {
-		deleteComputeInstanceFixtureResource(ctx,
-			func(deleteCtx context.Context) error {
-				_, err := clients.securityGroups.Delete(deleteCtx, privatev1.SecurityGroupsDeleteRequest_builder{Id: securityGroupID}.Build())
-				return err
-			})
+		Expect(cleanupSecurityGroupFixture(ctx, clients.securityGroups, securityGroupID)).To(Succeed())
 	}
 	if subnetID != "" {
-		deleteComputeInstanceFixtureResource(ctx,
-			func(deleteCtx context.Context) error {
-				_, err := clients.subnets.Delete(deleteCtx, privatev1.SubnetsDeleteRequest_builder{Id: subnetID}.Build())
-				return err
-			})
+		Expect(cleanupSubnetFixture(ctx, clients.subnets, subnetID)).To(Succeed())
+		waitForNotFound(func() error {
+			_, err := clients.subnets.Get(ctx, privatev1.SubnetsGetRequest_builder{Id: subnetID}.Build())
+			return err
+		})
 	}
 	if virtualNetworkID != "" {
-		// VirtualNetworks may have an operator finalizer, so Delete can acknowledge the
-		// soft delete while Get continues returning the object until asynchronous cleanup
-		// completes. The deletion timestamp is enough to release this fixture's dependency
-		// before deleting its NetworkClass.
-		deleteComputeInstanceFixtureResource(ctx,
-			func(deleteCtx context.Context) error {
-				_, err := clients.virtualNetworks.Delete(deleteCtx, privatev1.VirtualNetworksDeleteRequest_builder{Id: virtualNetworkID}.Build())
-				return err
-			})
+		Expect(cleanupVirtualNetworkFixture(ctx, clients.virtualNetworks, virtualNetworkID)).To(Succeed())
+		waitForNotFound(func() error {
+			_, err := clients.virtualNetworks.Get(ctx, privatev1.VirtualNetworksGetRequest_builder{Id: virtualNetworkID}.Build())
+			return err
+		})
 	}
 	if networkClassID != "" {
-		deleteAndWaitForComputeInstanceFixtureResource(ctx,
-			func(deleteCtx context.Context) error {
-				_, err := clients.networkClasses.Delete(deleteCtx, privatev1.NetworkClassesDeleteRequest_builder{Id: networkClassID}.Build())
-				return err
-			},
-			func(getCtx context.Context) error {
-				_, err := clients.networkClasses.Get(getCtx, privatev1.NetworkClassesGetRequest_builder{Id: networkClassID}.Build())
-				return err
-			})
+		// The class delete rejects with FailedPrecondition while its active
+		// VirtualNetwork is still counted server-side after the resource's own
+		// deletion completed; retry until the active count clears.
+		Eventually(func() error {
+			probeCtx, cancel := context.WithTimeout(ctx, computeInstanceFixtureProbeTimeout)
+			defer cancel()
+			_, err := clients.networkClasses.Delete(probeCtx, privatev1.NetworkClassesDeleteRequest_builder{Id: networkClassID}.Build())
+			if grpcstatus.Code(err) == grpccodes.NotFound {
+				return nil
+			}
+			return err
+		}, time.Minute, time.Second).Should(Succeed())
+		waitForNotFound(func() error {
+			probeCtx, cancel := context.WithTimeout(ctx, computeInstanceFixtureProbeTimeout)
+			defer cancel()
+			_, err := clients.networkClasses.Get(probeCtx, privatev1.NetworkClassesGetRequest_builder{Id: networkClassID}.Build())
+			return err
+		})
 	}
 	if computeInstanceTemplateID != "" {
 		deleteAndWaitForComputeInstanceFixtureResource(ctx,

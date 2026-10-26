@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -187,6 +188,14 @@ func (r *ComputeInstanceReconciler) updateStatusWithRetry(ctx context.Context, k
 		}
 		// Copy status updates to the latest version
 		latest.Status = newStatus
+		if !latest.DeletionTimestamp.IsZero() {
+			// Provisioning can finish after the API has accepted deletion. Keep
+			// the provider job history for cleanup, but don't publish stale
+			// Running/Ready state over the deletion state.
+			latest.Status.Phase = v1alpha1.ComputeInstancePhaseDeleting
+			latest.SetStatusCondition(v1alpha1.ComputeInstanceConditionReady, metav1.ConditionFalse,
+				"ComputeInstance is being deleted", v1alpha1.ReasonDeleting)
+		}
 		// Attempt to update with fresh resourceVersion
 		return r.Status().Update(ctx, latest)
 	})
@@ -360,7 +369,7 @@ func (r *ComputeInstanceReconciler) handleProvisioning(ctx context.Context, inst
 				// If the VM already exists (re-provisioning failure), the phase is driven by KubeVirt
 				// PrintableStatus and the failed job is visible in status.provisioningJobs.
 				if instance.Status.VirtualMachineReference == nil {
-					instance.Status.Phase = v1alpha1.ComputeInstancePhaseFailed
+					setComputeInstancePhase(&instance.Status, v1alpha1.ComputeInstancePhaseFailed)
 				}
 				instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionProvisioned, metav1.ConditionFalse, message, v1alpha1.ReasonProvisioningFailed)
 			},
@@ -510,7 +519,7 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ reconcil
 	// Initialize phase to Starting for brand-new CIs (Phase is empty until first set).
 	// Overridden by determinePhaseFromPrintableStatus() once a KubeVirt VM exists.
 	if instance.Status.Phase == "" {
-		instance.Status.Phase = v1alpha1.ComputeInstancePhaseStarting
+		setComputeInstancePhase(&instance.Status, v1alpha1.ComputeInstancePhaseStarting)
 	}
 
 	// Get the tenant (on local cluster)
@@ -552,10 +561,10 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ reconcil
 		if err := r.handleKubeVirtVM(ctx, targetClient, instance, kv); err != nil {
 			return ctrl.Result{}, err
 		}
-		instance.Status.Phase = determinePhaseFromPrintableStatus(ctx, kv, instance.Status.Phase)
+		setComputeInstancePhase(&instance.Status, determinePhaseFromPrintableStatus(ctx, kv, instance.Status.Phase))
 	} else {
 		// No KubeVirt VM exists yet: infrastructure is being provisioned.
-		instance.Status.Phase = v1alpha1.ComputeInstancePhaseStarting
+		setComputeInstancePhase(&instance.Status, v1alpha1.ComputeInstancePhaseStarting)
 		instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionProvisioned, metav1.ConditionFalse, "VirtualMachine not yet created, waiting for provisioning", v1alpha1.ReasonWaitingForVM)
 		instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionReady, metav1.ConditionFalse, "", v1alpha1.ReasonAsExpected)
 		instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionRestartRequired, metav1.ConditionFalse, "", v1alpha1.ReasonAsExpected)
@@ -588,6 +597,8 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ reconcil
 			}
 		}
 	}
+
+	recordRunningConfig(instance)
 
 	// Inject tenant storage classes into context for AAP extra_vars.
 	// Prefer Tenant.status.storageClasses (populated by the storage controller);
@@ -643,16 +654,27 @@ func (r *ComputeInstanceReconciler) handleDelete(ctx context.Context, _ reconcil
 	log := ctrllog.FromContext(ctx)
 	log.Info("deleting compute instance")
 
-	instance.Status.Phase = v1alpha1.ComputeInstancePhaseDeleting
+	// The outer Reconcile persists status after handleDelete returns. Keep the
+	// base finalizer until a later reconcile observes that status in the API.
+	oldStatus := instance.Status.DeepCopy()
+	setComputeInstancePhase(&instance.Status, v1alpha1.ComputeInstancePhaseDeleting)
+	instance.SetStatusCondition(v1alpha1.ComputeInstanceConditionReady, metav1.ConditionFalse,
+		"ComputeInstance is being deleted", v1alpha1.ReasonDeleting)
 
 	// Base finalizer has already been removed, cleanup complete
 	if !controllerutil.ContainsFinalizer(instance, osacComputeInstanceFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
+	done, result, err := reconcileAutoExternalIPCleanup(ctx, r.Client, r.NetworkingNamespace,
+		autoExternalIPOwner{kind: computeInstanceOwner, id: instance.Labels[osacComputeInstanceIDLabel]}, r.StatusPollInterval)
+	if err != nil || !done {
+		return result, err
+	}
+
 	// Handle deprovisioning - provider decides internally if needed
 	log.Info("handling deletion")
-	result, err := r.handleDeprovisioning(ctx, instance)
+	result, err = r.handleDeprovisioning(ctx, instance)
 	if err != nil {
 		return result, err
 	}
@@ -660,6 +682,10 @@ func (r *ComputeInstanceReconciler) handleDelete(ctx context.Context, _ reconcil
 	// If we need to requeue (jobs still running or provider needs time), do so
 	if result.RequeueAfter > 0 {
 		return result, nil
+	}
+
+	if !equality.Semantic.DeepEqual(instance.Status, *oldStatus) {
+		return ctrl.Result{RequeueAfter: r.StatusPollInterval}, nil
 	}
 
 	// Deprovisioning complete or skipped, remove base finalizer
@@ -1062,6 +1088,104 @@ func (r *ComputeInstanceReconciler) handleDesiredConfigVersion(ctx context.Conte
 	}
 	instance.Status.DesiredConfigVersion = version
 	return nil
+}
+
+// recordRunningConfig records the desired config version that is actually running, with the
+// time of that observation, so the running instance type can be billed from when it started
+// running rather than from when the change was reported downstream. The version is recorded
+// once per configuration: while it is unchanged the recorded time stays put. The instance
+// type name is part of the recorded identity: two types with identical resources hash to the
+// same config version, and a resize between them must still move the stamp.
+//
+// The record is the CR-side half of crConfirmsRunningType: recording establishes the name and
+// time that the predicate later vouches with. A pending restart invalidates any earlier
+// observation, so it is cleared; KubeVirt reports RestartRequired asynchronously, so an
+// absent or unknown condition vouches for nothing yet, and the record waits for it to become
+// explicitly false before it can confirm anything.
+func recordRunningConfig(instance *v1alpha1.ComputeInstance) {
+	restart, present := restartRequired(instance)
+	switch {
+	case present && restart == metav1.ConditionTrue:
+		clearRecordedRunningConfig(instance)
+		return
+	case !present || restart != metav1.ConditionFalse:
+		return
+	}
+	label := instance.Labels[osacComputeInstanceTypeNameLabel]
+	if label == "" {
+		return
+	}
+	// Steady state: the CR already confirms the labeled type running with the current
+	// desired config, so the recorded observation stays put.
+	if crConfirmsRunningType(instance, label) &&
+		instance.Status.RunningConfigVersion == instance.Status.DesiredConfigVersion {
+		return
+	}
+	if instance.Status.Phase != v1alpha1.ComputeInstancePhaseRunning {
+		return
+	}
+	if !instance.IsStatusConditionTrue(v1alpha1.ComputeInstanceConditionConfigurationApplied) {
+		return
+	}
+	since := metav1.NewTime(time.Now().UTC())
+	instance.Status.RunningConfigVersion = instance.Status.DesiredConfigVersion
+	instance.Status.RunningInstanceTypeName = label
+	instance.Status.RunningConfigSince = &since
+}
+
+// crConfirmsRunningType reports whether the CR confirms that the requested instance type is
+// the one actually running. All three clauses must hold: the instance-type label exists and
+// names the requested type, so the reconciler has applied it; the recorded running-config
+// observation names the same type, so recordRunningConfig observed it running; and the
+// RestartRequired condition exists and is explicitly false, so no restart is pending that the
+// observation would predate. A label that names another type describes a resize the
+// reconciler has not applied, a recorded name that lags the label describes the previous
+// type, and a missing or unknown restart condition vouches for nothing.
+func crConfirmsRunningType(instance *v1alpha1.ComputeInstance, requested string) bool {
+	if requested == "" {
+		return false
+	}
+	if instance.Labels[osacComputeInstanceTypeNameLabel] != requested {
+		return false
+	}
+	if instance.Status.RunningInstanceTypeName != requested {
+		return false
+	}
+	restart, present := restartRequired(instance)
+	return present && restart == metav1.ConditionFalse
+}
+
+// restartRequired reads the RestartRequired condition. The second result is false when the
+// condition is absent.
+func restartRequired(instance *v1alpha1.ComputeInstance) (metav1.ConditionStatus, bool) {
+	condition := meta.FindStatusCondition(instance.Status.Conditions,
+		string(v1alpha1.ComputeInstanceConditionRestartRequired))
+	if condition == nil {
+		return "", false
+	}
+	return condition.Status, true
+}
+
+// clearRecordedRunningConfig drops the recorded running-config observation. Used when a
+// pending restart invalidates it: the observation predates the restart and cannot vouch for
+// the configuration that runs after it.
+func clearRecordedRunningConfig(instance *v1alpha1.ComputeInstance) {
+	instance.Status.RunningConfigVersion = ""
+	instance.Status.RunningInstanceTypeName = ""
+	instance.Status.RunningConfigSince = nil
+}
+
+// setComputeInstancePhase records the phase and, when it changes, the time of the change, so
+// metering can bill the state transition from the moment it happened rather than from when
+// feedback noticed it. The time is stamped once per phase change and kept while the phase is
+// unchanged, the same recordRunningConfig pattern as RunningConfigSince.
+func setComputeInstancePhase(status *v1alpha1.ComputeInstanceStatus, phase v1alpha1.ComputeInstancePhaseType) {
+	if status.Phase == phase {
+		return
+	}
+	status.Phase = phase
+	now := metav1.Now()
+	status.PhaseTransitionTime = &now
 }
 
 func conditionReason(instance *v1alpha1.ComputeInstance, condType v1alpha1.ComputeInstanceConditionType) string {

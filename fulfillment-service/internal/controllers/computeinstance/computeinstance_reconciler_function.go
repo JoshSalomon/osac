@@ -95,6 +95,7 @@ type function struct {
 	logger                      *slog.Logger
 	hubCache                    controllers.HubCache
 	networkingHubReader         controllers.NetworkingHubReader
+	networkingCleanup           controllers.WorkloadNetworkingCleanup
 	computeInstancesClient      privatev1.ComputeInstancesClient
 	externalIPsClient           privatev1.ExternalIPsClient
 	externalIPAttachmentsClient privatev1.ExternalIPAttachmentsClient
@@ -156,6 +157,7 @@ func (b *FunctionBuilder) Build() (result controllers.ReconcilerFunction[*privat
 	// Create and populate the object:
 	object := &function{
 		logger:                      b.logger,
+		networkingCleanup:           controllers.NewWorkloadNetworkingCleanup(b.connection),
 		computeInstancesClient:      privatev1.NewComputeInstancesClient(b.connection),
 		externalIPsClient:           privatev1.NewExternalIPsClient(b.connection),
 		externalIPAttachmentsClient: privatev1.NewExternalIPAttachmentsClient(b.connection),
@@ -211,7 +213,7 @@ func (r *function) run(ctx context.Context, computeInstance *privatev1.ComputeIn
 				proto.Reset(computeInstance)
 				proto.Merge(computeInstance, oldComputeInstance)
 			}
-		} else if !errors.Is(reconcileErr, errTransientK8sError) {
+		} else if !errors.Is(reconcileErr, errTransientK8sError) && !controllers.IsRequeueable(reconcileErr) {
 			t.setReconciliationFailed(reconcileErr)
 		}
 	}
@@ -276,7 +278,7 @@ func (t *task) update(ctx context.Context) error {
 	}
 
 	// Set the user data Secret name if user data is provided (no K8s call yet):
-	if t.computeInstance.GetSpec().HasUserData() || t.computeInstance.GetSpec().GetUserDataSecret() != nil {
+	if t.computeInstance.GetSpec().GetUserDataSource() != nil {
 		t.userDataSecretName = fmt.Sprintf("%s%s", t.computeInstance.GetId(), userDataSecretSuffix)
 	}
 
@@ -330,6 +332,17 @@ func (t *task) update(ctx context.Context) error {
 		spec.NetworkAttachments = object.Spec.NetworkAttachments
 		update := object.DeepCopy()
 		update.Spec = spec
+		// Keep the instance-type-name label in sync with the spec being patched so it
+		// always names the type the CR was reconciled toward. The operator's feedback
+		// controller gates the running-type stamp on this label; updating it atomically
+		// with the spec prevents a requested resize from being billed before the CR
+		// actually carries the new configuration.
+		if instanceType := t.computeInstance.GetSpec().GetInstanceType(); instanceType != nil {
+			if update.Labels == nil {
+				update.Labels = map[string]string{}
+			}
+			update.Labels[labels.InstanceTypeName] = instanceType.GetName()
+		}
 		err = t.hubClient.Patch(ctx, update, clnt.MergeFrom(object))
 		if err != nil {
 			if err := controllers.HandleK8sWriteError(ctx, t.r.logger, err, t.setFailed); err != nil {
@@ -406,6 +419,9 @@ func (t *task) delete(ctx context.Context) (err error) {
 	t.hubId = t.computeInstance.GetStatus().GetHub()
 	if t.hubId == "" {
 		// No hub assigned, nothing to clean up on K8s side.
+		if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.computeInstance.GetId()); err != nil {
+			return err
+		}
 		t.removeFinalizer()
 		return nil
 	}
@@ -413,6 +429,9 @@ func (t *task) delete(ctx context.Context) (err error) {
 	if err != nil {
 		// Check if the hub has been decommissioned (deleted from database)
 		if errors.Is(err, controllers.ErrHubNotFound) {
+			if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.computeInstance.GetId()); err != nil {
+				return err
+			}
 			controllers.RemoveFinalizerOnDecommissionedHub(ctx, t.r.logger, t.hubId, "compute_instance_id", t.computeInstance.GetId(), t.removeFinalizer)
 			return nil
 		}
@@ -433,6 +452,9 @@ func (t *task) delete(ctx context.Context) (err error) {
 			"Compute instance doesn't exist",
 			slog.String("id", t.computeInstance.GetId()),
 		)
+		if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.computeInstance.GetId()); err != nil {
+			return err
+		}
 		t.removeFinalizer()
 		return
 	}
@@ -1206,19 +1228,19 @@ func (t *task) ensureUserDataSecret(ctx context.Context, owner *osacv1alpha1.Com
 }
 
 func (t *task) resolveUserData(ctx context.Context) (string, error) {
-	ref := t.computeInstance.GetSpec().GetUserDataSecret()
+	ref := t.computeInstance.GetSpec().GetUserDataSource().GetSecret()
 	if ref == nil {
-		return t.computeInstance.GetSpec().GetUserData(), nil
+		return t.computeInstance.GetSpec().GetUserDataSource().GetInline(), nil
 	}
 	if t.r.secretsClient == nil {
-		return "", errors.New("secrets client is required to resolve user_data_secret")
+		return "", errors.New("secrets client is required to resolve user_data_source.secret")
 	}
 	if ref.GetId() == "" {
-		return "", errors.New("user_data_secret must have an id")
+		return "", errors.New("user_data_source.secret must have an id")
 	}
 	response, err := t.r.secretsClient.Get(ctx, privatev1.SecretsGetRequest_builder{Id: ref.GetId()}.Build())
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch user_data_secret: %w", err)
+		return "", fmt.Errorf("failed to fetch user_data_source.secret: %w", err)
 	}
 	value, ok := response.GetObject().GetData()[userDataSecretKey]
 	if !ok || len(value) == 0 {

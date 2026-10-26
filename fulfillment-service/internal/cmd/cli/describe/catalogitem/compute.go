@@ -70,7 +70,7 @@ func computeView(item *publicv1.ComputeInstanceCatalogItem) view {
 			formatRef(p.GetLocked()), formatRef(p.GetEditable().GetDefaultValue()))
 	}
 	addComputeRunStrategy(&v.fields, fields.GetRunStrategy())
-	addString(&v.fields, "User data", fields.GetUserData(), true)
+	addUserDataSource(&v.fields, fields.GetUserDataSource())
 	addComputeAttachments(&v.fields, fields.GetNetworkAttachments())
 	addBool(&v.fields, "Auto external IP attachment", fields.GetAutoExternalIpAttachment())
 	addComputeDisks(&v.fields, fields.GetAdditionalDisks())

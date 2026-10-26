@@ -2,7 +2,7 @@ import { Route, Routes } from 'react-router-dom';
 import { create } from '@bufbuild/protobuf';
 import { Code, ConnectError, createRouterTransport } from '@connectrpc/connect';
 import { screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
   BareMetalInstanceCatalogItem,
@@ -17,40 +17,20 @@ import {
   Metadata,
   ServiceTier,
 } from '@osac/types';
+import { getViewTypePrefKey } from '@osac/ui-components/hooks/use-view-type';
 
-import CatalogPage from './CatalogPage';
+import CatalogPage, { CATALOG_ITEMS_VIEW_KEY } from './CatalogPage';
 import {
   type CatalogListFilterableItem,
   catalogItemMatchesListFilter,
 } from '../../api/v1/catalog-item-list-filter';
-import { CATALOG_ITEMS_VIEW_KEY } from '../../components/catalog/CatalogItemListSection';
 import { CatalogItemDetailPage } from '../../components/catalog/details/CatalogItemDetailPage.tsx';
-import { getViewTypePrefKey } from '../../components/Primitives/ViewSwitcher';
-import type { UserRole } from '../../shellTypes';
 import { wrapWithAuthInterceptor } from '../../test-utils/createMockConnectTransport';
 import { renderWithProviders } from '../../test-utils/TestProviders';
 
 const catalogItemsViewPrefKey = getViewTypePrefKey(CATALOG_ITEMS_VIEW_KEY);
 
-vi.mock('@osac/ui-components/hooks/use-session.tsx', () => ({
-  useSession: vi.fn(),
-}));
-
-const { useSession } = await import('@osac/ui-components/hooks/use-session');
-
 const allCatalogServiceTiers = [ServiceTier.CAAS, ServiceTier.VMAAS, ServiceTier.BMAAS];
-
-const setMockSession = (
-  enabledServices: ServiceTier[] = allCatalogServiceTiers,
-  role: UserRole = 'admin',
-) => {
-  vi.mocked(useSession).mockReturnValue({
-    role,
-    username: 'test-user',
-    tenantId: 'test-tenant',
-    enabledServices,
-  } as ReturnType<typeof useSession>);
-};
 
 const vmCatalogMetaData: Metadata = {
   $typeName: 'osac.public.v1.Metadata',
@@ -74,6 +54,14 @@ const vmCatalogItem: ComputeInstanceCatalogItem = {
   template: create(ComputeInstanceTemplateReferenceSchema, { id: 'tpl-rhel-9' }),
   published: true,
   templateParameters: {},
+};
+
+const vmCatalogItemForDisplay: ComputeInstanceCatalogItem = {
+  ...vmCatalogItem,
+  metadata: {
+    ...vmCatalogMetaData,
+    labels: { env: 'prod' },
+  },
 };
 
 const clusterCatalogItem: ClusterCatalogItem = {
@@ -269,8 +257,29 @@ const createRequestCounts = (): CatalogRequestCounts => ({
   bm: 0,
 });
 
-const renderCatalogPage = (transport = unauthorizedTransport, routerEntries = ['/catalog']) =>
-  renderWithProviders(<CatalogPage />, { transport, routerEntries });
+const renderCatalogPage = (
+  transport = unauthorizedTransport,
+  enabledServices: ServiceTier[] = allCatalogServiceTiers,
+  routerEntries = ['/catalog'],
+) =>
+  renderWithProviders(<CatalogPage />, {
+    transport,
+    routerEntries,
+    apiFixtures: { enabledServices },
+  });
+
+const renderVmCatalogItemList = (viewType: 'cards' | 'list') => {
+  if (viewType === 'list') {
+    localStorage.setItem(catalogItemsViewPrefKey, 'list');
+  }
+
+  return renderCatalogPage(
+    createCatalogPageTransport({
+      vmItems: [vmCatalogItemForDisplay],
+      clusterItems: [],
+    }),
+  );
+};
 
 const renderCatalogPageWithDetailRoutes = (transport = createCatalogPageTransport()) =>
   renderWithProviders(
@@ -286,7 +295,6 @@ const renderCatalogPageWithDetailRoutes = (transport = createCatalogPageTranspor
 describe('CatalogPage', () => {
   beforeEach(() => {
     localStorage.clear();
-    setMockSession();
   });
 
   it('keeps type filter toggles in the DOM when catalog queries return 401', async () => {
@@ -359,6 +367,59 @@ describe('CatalogPage', () => {
     });
   });
 
+  it('renders catalog items as cards in card view', async () => {
+    renderVmCatalogItemList('cards');
+
+    await waitFor(() => {
+      expect(screen.getByText(vmCatalogItemForDisplay.metadata?.name ?? '')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole('grid')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('link', {
+        name: vmCatalogItemForDisplay.metadata?.name,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Virtual Machine')).toBeInTheDocument();
+    expect(screen.getByText('foo')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: `Actions for ${vmCatalogItemForDisplay.metadata?.name}`,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it('renders a table of catalog items in list view', async () => {
+    renderVmCatalogItemList('list');
+
+    await waitFor(() => {
+      expect(screen.getByRole('grid', { name: 'Catalog items' })).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole('columnheader', { name: 'Name' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Configuration' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Visibility' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Created' })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', {
+        name: `Open catalog item details for ${vmCatalogItemForDisplay.metadata?.name}`,
+      }),
+    ).not.toBeInTheDocument();
+
+    expect(
+      screen.getByRole('link', { name: vmCatalogItemForDisplay.metadata?.name }),
+    ).toHaveAttribute('href', `/catalog/vm/${vmCatalogItemForDisplay.id}`);
+    expect(screen.getByText('Virtual Machine')).toBeInTheDocument();
+    expect(screen.getByText('foo')).toBeInTheDocument();
+    expect(screen.queryByText(/env/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: `Actions for ${vmCatalogItemForDisplay.metadata?.name}`,
+      }),
+    ).toBeInTheDocument();
+  });
+
   it.each([
     {
       service: ServiceTier.CAAS,
@@ -384,13 +445,13 @@ describe('CatalogPage', () => {
   ])(
     'renders only the $service service surface and queries its catalog',
     async ({ service, title, enabledRequest, disabledRequests, disabledFilters }) => {
-      setMockSession([service]);
       const requestCounts = createRequestCounts();
       renderCatalogPage(
         createCatalogPageTransport({
           bmItems: [bareMetalCatalogItem],
           requestCounts,
         }),
+        [service],
       );
 
       await waitFor(() => {
@@ -411,9 +472,8 @@ describe('CatalogPage', () => {
   );
 
   it('loads without service catalog requests when enabled services are MASS', async () => {
-    setMockSession([ServiceTier.MAAS]);
     const requestCounts = createRequestCounts();
-    renderCatalogPage(createCatalogPageTransport({ requestCounts }));
+    renderCatalogPage(createCatalogPageTransport({ requestCounts }), [ServiceTier.MAAS]);
 
     expect(
       await screen.findByRole('heading', { name: 'No catalog items found' }),
@@ -437,9 +497,8 @@ describe('CatalogPage', () => {
   });
 
   it('loads without service catalog requests when enabled services are empty', async () => {
-    setMockSession([]);
     const requestCounts = createRequestCounts();
-    renderCatalogPage(createCatalogPageTransport({ requestCounts }));
+    renderCatalogPage(createCatalogPageTransport({ requestCounts }), []);
 
     expect(
       await screen.findByRole('heading', { name: 'No catalog items found' }),
@@ -464,8 +523,7 @@ describe('CatalogPage', () => {
   });
 
   it('ignores a disabled type in the URL filter', async () => {
-    setMockSession([ServiceTier.CAAS]);
-    renderCatalogPage(createCatalogPageTransport(), ['/catalog?types=vm']);
+    renderCatalogPage(createCatalogPageTransport(), [ServiceTier.CAAS], ['/catalog?types=vm']);
 
     await waitFor(() => {
       expect(screen.getByText(clusterCatalogItem.metadata?.name ?? '')).toBeInTheDocument();
@@ -546,7 +604,7 @@ describe('CatalogPage', () => {
     });
   });
 
-  it('shows an error from a failed catalog type alongside items that loaded', async () => {
+  it('shows a page error when one catalog type fails even if others loaded', async () => {
     renderCatalogPage(
       createCatalogPageTransport({
         clusterError: Object.assign(new Error(), { name: 'UnauthorizedError' }),
@@ -556,12 +614,13 @@ describe('CatalogPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Unauthorized')).toBeInTheDocument();
     });
-    // VMs loaded successfully, so their items stay visible next to the error.
-    expect(screen.getByText(vmCatalogItem.metadata?.name ?? '')).toBeInTheDocument();
+    expect(screen.queryByText(vmCatalogItem.metadata?.name ?? '')).not.toBeInTheDocument();
     expect(screen.queryByText(clusterCatalogItem.metadata?.name ?? '')).not.toBeInTheDocument();
+    // VMs loaded successfully, so search stays enabled despite the cluster error.
+    expect(screen.getByRole('textbox', { name: 'Filter catalog by keyword' })).toBeEnabled();
   });
 
-  it('shows a generic section error for non-401 failures', async () => {
+  it('shows a page error for non-401 failures', async () => {
     renderCatalogPage(
       createCatalogPageTransport({ vmError: new Error('Catalog service unavailable') }),
     );
@@ -642,7 +701,7 @@ describe('CatalogPage', () => {
     localStorage.setItem(catalogItemsViewPrefKey, 'list');
 
     const { user } = renderWithProviders(<CatalogPage />, {
-      transport: createCatalogPageTransport(),
+      transport: createCatalogPageTransport({ bmItems: [bareMetalCatalogItem] }),
       routerEntries: ['/catalog?types=cluster&published=unpublished&search=no-such-item'],
     });
 
@@ -670,6 +729,10 @@ describe('CatalogPage', () => {
       expect(screen.getByText(clusterCatalogItem.metadata?.name || 'N/A')).toBeInTheDocument();
     });
 
+    expect(screen.getByRole('button', { name: /Bare Metal Machines/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
     expect(screen.getByRole('button', { name: /Clusters/ })).toHaveAttribute(
       'aria-pressed',
       'true',

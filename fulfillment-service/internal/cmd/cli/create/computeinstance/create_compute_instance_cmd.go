@@ -34,6 +34,7 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/cmd/cli/create/fieldutil"
+	"github.com/osac-project/osac/fulfillment-service/internal/cmd/cli/create/metautil"
 	"github.com/osac-project/osac/fulfillment-service/internal/cmd/cli/create/netutil"
 	"github.com/osac-project/osac/fulfillment-service/internal/cmd/cli/lookup"
 	"github.com/osac-project/osac/fulfillment-service/internal/config"
@@ -299,12 +300,8 @@ func (c *runnerContext) run(cmd *cobra.Command, args []string) error {
 		}
 
 		computeInstance := publicv1.ComputeInstance_builder{
-			Metadata: publicv1.Metadata_builder{
-				Name:    c.args.name,
-				Tenant:  c.settings.Tenant(),
-				Project: config.ProjectFromContext(ctx),
-			}.Build(),
-			Spec: specResult,
+			Metadata: metautil.ForCreate(ctx, c.args.name).Build(),
+			Spec:     specResult,
 		}.Build()
 
 		response, err := c.computeInstancesClient.Create(ctx, publicv1.ComputeInstancesCreateRequest_builder{
@@ -357,11 +354,8 @@ func (c *runnerContext) run(cmd *cobra.Command, args []string) error {
 
 	// Prepare the compute instance:
 	computeInstance := publicv1.ComputeInstance_builder{
-		Metadata: publicv1.Metadata_builder{
-			Name:    c.args.name,
-			Project: config.ProjectFromContext(ctx),
-		}.Build(),
-		Spec: spec,
+		Metadata: metautil.ForCreate(ctx, c.args.name).Build(),
+		Spec:     spec,
 	}.Build()
 
 	// Create the compute instance:
@@ -789,10 +783,10 @@ func (c *runnerContext) buildSpec(templateID string,
 		spec.RunStrategy = &rs
 	}
 	if c.args.userData != "" {
-		spec.UserData = proto.String(c.args.userData)
+		spec.UserDataSource = publicv1.UserDataSource_builder{Inline: proto.String(c.args.userData)}.Build()
 	}
 	if c.args.userDataSecret != "" {
-		spec.UserDataSecret = publicv1.SecretLocalReference_builder{Name: c.args.userDataSecret}.Build()
+		spec.UserDataSource = publicv1.UserDataSource_builder{Secret: publicv1.SecretLocalReference_builder{Name: c.args.userDataSecret}.Build()}.Build()
 	}
 	if err := c.applyNetworkingFlags(&spec); err != nil {
 		return nil, err
@@ -939,10 +933,10 @@ func (c *runnerContext) buildSpecFromCatalogItem(catalogItemID string) (*publicv
 		spec.RunStrategy = &rs
 	}
 	if c.args.userData != "" {
-		spec.UserData = proto.String(c.args.userData)
+		spec.UserDataSource = publicv1.UserDataSource_builder{Inline: proto.String(c.args.userData)}.Build()
 	}
 	if c.args.userDataSecret != "" {
-		spec.UserDataSecret = publicv1.SecretLocalReference_builder{Name: c.args.userDataSecret}.Build()
+		spec.UserDataSource = publicv1.UserDataSource_builder{Secret: publicv1.SecretLocalReference_builder{Name: c.args.userDataSecret}.Build()}.Build()
 	}
 	if err := c.applyNetworkingFlags(&spec); err != nil {
 		return nil, err

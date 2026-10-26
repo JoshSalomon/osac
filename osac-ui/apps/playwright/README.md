@@ -45,7 +45,8 @@ run playwright`.) None of these have defaults — each is required, so a missing
 value fails immediately with a clear error instead of silently pointing at the
 wrong environment. `pnpm playwright` logs in, runs the [smoke
 test](#smoke-test), and runs every spec under `scratch/` — see [Writing a
-test](#writing-a-test).
+test](#writing-a-test). Tracked UI flows are excluded from this default
+command; select a project explicitly in the [flow instructions](#tenant-and-disk-image-flow-tests).
 
 For iterating on a `scratch/` spec, logging in on every run is slow and adds a
 real Keycloak request each time. Log in once, then re-run just the spec as
@@ -60,34 +61,38 @@ pnpm playwright:run     # ...repeat as many times as you're iterating
 `pnpm playwright:run` never re-authenticates — if `.auth/user.json` is missing
 or the session has expired, re-run `pnpm playwright:setup` first.
 
-### Tenant flow tests
+### Tenant and disk image flow tests
 
-The tenant create and delete specs require these additional environment
-variables:
+The create, lifecycle, and delete specs read resource names and disk image
+values from `apps/e2e-tests/extravars.yaml`. Before running, set `tenant_name`
+to a tenant that does not already exist and set `disk_image.name` to a unique
+name for the target cluster.
 
-| Variable              | Description                                                                                                                                        |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OSAC_TENANT_NAME`    | Tenant name used by the create and delete flows. The create flow requires that it does not already exist; the delete flow requires that it exists. |
-| `IGNORE_HTTPS_ERRORS` | Set to `true` for trusted lab clusters using a self-signed or cluster-internal certificate.                                                        |
+The tenant create flow requires that the configured tenant does not already
+exist; the delete flow requires that it exists. The disk image create, lifecycle,
+and delete flows use the configured disk image values and lifecycle actions.
+All VMaaS specs are skipped before browser actions when `tenant_name` is unset or
+empty.
+The create project owns the delete project as teardown, so cleanup runs after
+the lifecycle project even if a lifecycle assertion fails.
 
-Set all variables before running the tenant tests:
+Set the deployment and login variables from the [Running](#running) section,
+then run the flows:
 
 ```bash
 export OSAC_UI_BASE_URL=https://osac-ui-<namespace>.<cluster-domain>
 export OSAC_USERNAME=<keycloak-user>
 read -rs OSAC_PASSWORD && export OSAC_PASSWORD
-export OSAC_TENANT_NAME=tenant1
-export IGNORE_HTTPS_ERRORS=true
 ```
 
-Run the create and delete flow together. The `vmaas-delete` project depends on
-`vmaas`, so creation runs before deletion:
+Run the tenant create and delete flows together. The `vmaas-delete` project
+depends on `vmaas`, so creation runs before deletion:
 
 ```bash
 pnpm --filter @osac/playwright exec playwright test --project=vmaas-delete
 ```
 
-Run the flows separately:
+Run the tenant and disk image flows:
 
 ```bash
 pnpm --filter @osac/playwright exec playwright test \
@@ -95,6 +100,70 @@ pnpm --filter @osac/playwright exec playwright test \
 
 pnpm --filter @osac/playwright exec playwright test \
   delete.tenant.spec.ts --project=vmaas-delete --no-deps
+
+pnpm --filter @osac/playwright exec playwright test \
+  --project=vmaas-disk-image-lifecycle
+```
+
+The `vmaas-disk-image-lifecycle` project depends on `vmaas-disk-image`. The
+create project's teardown deletes the image after the lifecycle project
+finishes, including when the lifecycle test fails. To run only the cleanup
+against an existing obsolete image, use
+`--project=vmaas-disk-image-delete --no-deps`; this deletes the named image.
+Each run appends a unique suffix to `disk_image.name`, and the full name appears
+in the test title. To clean up an interrupted run, set
+`OSAC_DISK_IMAGE_TEST_RUN_ID` to that run's suffix when invoking the delete
+ project.
+
+### Catalog CLI flow tests
+
+The catalog flow runs the `osac` CLI from Playwright, then opens the live UI,
+logs in, and verifies the created item on the Catalog page. Authenticate the
+CLI against the target environment before starting the test, for example with
+`osac login`. Set `OSAC_UI_BASE_URL`, `OSAC_USERNAME`, and `OSAC_PASSWORD` for
+the browser verification.
+
+The catalog configuration is in `apps/e2e-tests/extravars.yaml`:
+
+| Parameter                                 | Description                                                       |
+| ----------------------------------------- | ----------------------------------------------------------------- |
+| `catalog.name`                            | Unique catalog item name to create and delete                     |
+| `catalog.template`                        | Existing compute instance template referenced by the catalog item |
+| `catalog.title`                           | Catalog title                                                     |
+| `catalog.description`                     | Catalog description                                               |
+| `catalog.fields.instance_type.name`       | Existing instance type referenced by the catalog item             |
+| `catalog.fields.instance_type.vcpus`      | Expected vCPU value displayed for the referenced instance type    |
+| `catalog.fields.instance_type.memory_gib` | Expected memory value displayed for the referenced instance type  |
+| `catalog.fields.boot_disk.size_gib`       | Boot-disk storage value displayed for the catalog item            |
+| `catalog.fields.disk_image.name`          | Existing disk image referenced by the catalog item                |
+
+Optional variables:
+
+| Variable          | Description                                                                             |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| `OSAC_CLI_PATH`   | Path to the `osac` executable; defaults to `osac` from `PATH`                           |
+| `OSAC_CLI_CONFIG` | CLI configuration directory; when unset, the CLI uses its normal configuration location |
+
+Run creation and deletion together. The delete project depends on the create
+project, and each CLI operation is followed by a JSON lookup and a browser
+check of the Catalog page:
+
+```bash
+export OSAC_UI_BASE_URL=https://osac-ui-<namespace>.<cluster-domain>
+export OSAC_CLI_CONFIG="$HOME/.config/osac"
+
+pnpm --filter @osac/playwright exec playwright test \
+  --project=vmaas-catalog-delete
+```
+
+Run the flows separately:
+
+```bash
+pnpm --filter @osac/playwright exec playwright test \
+  create.catalog.spec.ts --project=vmaas-catalog
+
+pnpm --filter @osac/playwright exec playwright test \
+  delete.catalog.spec.ts --project=vmaas-catalog-delete --no-deps
 ```
 
 Use `--headed` when a graphical display is available. Run these commands from
@@ -127,6 +196,67 @@ than trusting it by default:
 export OSAC_UI_BASE_URL=http://localhost:5173 OSAC_USERNAME=... IGNORE_HTTPS_ERRORS=true
 read -rs OSAC_PASSWORD && export OSAC_PASSWORD
 pnpm playwright
+```
+
+### Instance type flow tests
+
+The instance type tests read their hard-coded test data from
+`apps/e2e-tests/extravars.yaml`. Change the `instance_type` values there before
+running the flow if you need a different name, description, vCPU/memory values,
+or GPU configuration. The create test fails clearly if that instance type
+already exists.
+
+The tests run in this dependency order:
+
+1. `vmaas-instance-type` creates the instance type and verifies it is `Active`.
+2. `vmaas-instance-type-lifecycle` verifies the `Deprecate`, `Obsolete`, and
+   `Reactivate` transitions.
+3. `vmaas-instance-type-delete` deletes the instance type and waits for its row
+   to disappear.
+
+Set the common variables from the [Running](#running) section, then run the
+complete instance type flow from the repository root:
+
+```bash
+pnpm --filter @osac/playwright exec playwright test \
+  --project=vmaas-instance-type-lifecycle
+```
+
+Playwright runs the create dependency, then runs the create project's teardown
+to delete the instance type after the lifecycle test. Add `--headed` to the
+command when a graphical display is available:
+
+```bash
+pnpm --filter @osac/playwright exec playwright test \
+  --project=vmaas-instance-type-lifecycle --headed
+```
+
+To run the three instance-type tests separately, run them in this order:
+
+```bash
+pnpm --filter @osac/playwright exec playwright test \
+  create.instance_type.spec.ts --project=vmaas-instance-type --no-deps
+
+pnpm --filter @osac/playwright exec playwright test \
+  lifecycle.instance_type.spec.ts --project=vmaas-instance-type-lifecycle --no-deps
+
+pnpm --filter @osac/playwright exec playwright test \
+  delete.instance_type.spec.ts --project=vmaas-instance-type-delete --no-deps
+```
+
+The `--no-deps` option is appropriate only for the separate commands because
+the preceding command has already established the required instance type.
+Running the delete test removes the instance type from the deployment. If the
+requested instance type is absent, the standalone delete test creates it from
+`extravars.yaml` first; unrelated instance types already listed in the table
+are not modified.
+
+To run the tenant and instance type flows together, include both terminal
+projects; each terminal project runs its own dependency chain:
+
+```bash
+pnpm --filter @osac/playwright exec playwright test \
+  --project=vmaas-delete --project=vmaas-instance-type-lifecycle
 ```
 
 ## How authentication works

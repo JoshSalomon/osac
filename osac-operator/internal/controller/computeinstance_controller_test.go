@@ -191,6 +191,76 @@ var _ = Describe("ComputeInstance Controller", func() {
 		})
 	})
 
+	Context("deletion status persistence", func() {
+		It("persists terminal job status before removing the base finalizer", func() {
+			ctx := context.Background()
+			instance := &osacv1alpha1.ComputeInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-deletion-status-order",
+					Namespace:  "default",
+					Finalizers: []string{osacComputeInstanceFinalizer, osacComputeInstanceFeedbackFinalizer},
+				},
+				Spec: newTestComputeInstanceSpec("test_template"),
+			}
+			key := client.ObjectKeyFromObject(instance)
+			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
+			DeferCleanup(func() {
+				remaining := &osacv1alpha1.ComputeInstance{}
+				if k8sClient.Get(ctx, key, remaining) == nil {
+					remaining.Finalizers = nil
+					Expect(k8sClient.Update(ctx, remaining)).To(Succeed())
+				}
+			})
+
+			instance.Status.Phase = osacv1alpha1.ComputeInstancePhaseRunning
+			instance.Status.ProvisioningJobs = []osacv1alpha1.JobStatus{{
+				JobID:                  "deprovision-job",
+				Type:                   osacv1alpha1.JobTypeDeprovision,
+				Timestamp:              metav1.Now(),
+				State:                  osacv1alpha1.JobStateRunning,
+				BlockDeletionOnFailure: true,
+			}}
+			Expect(k8sClient.Status().Update(ctx, instance)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, instance)).To(Succeed())
+
+			reconciler := NewComputeInstanceReconciler(
+				testMcManager, "", "", "", &mockProvisioningProvider{name: "aap"},
+				100*time.Millisecond, 0, mcmanager.LocalCluster,
+			)
+			Eventually(func(g Gomega) {
+				cached := &osacv1alpha1.ComputeInstance{}
+				g.Expect(reconciler.Get(ctx, key, cached)).To(Succeed())
+				g.Expect(cached.DeletionTimestamp.IsZero()).To(BeFalse())
+				g.Expect(cached.Status.ProvisioningJobs).To(HaveLen(1))
+				g.Expect(cached.Status.ProvisioningJobs[0].State).To(Equal(osacv1alpha1.JobStateRunning))
+			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+
+			request := mcreconcile.Request{Request: reconcile.Request{NamespacedName: key}}
+			result, err := reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(100 * time.Millisecond))
+
+			persisted := &osacv1alpha1.ComputeInstance{}
+			Expect(k8sClient.Get(ctx, key, persisted)).To(Succeed())
+			Expect(persisted.Finalizers).To(ContainElement(osacComputeInstanceFinalizer))
+			Expect(persisted.Status.Phase).To(Equal(osacv1alpha1.ComputeInstancePhaseDeleting))
+			Expect(persisted.Status.ProvisioningJobs[0].State).To(Equal(osacv1alpha1.JobStateSucceeded))
+
+			Eventually(func(g Gomega) {
+				cached := &osacv1alpha1.ComputeInstance{}
+				g.Expect(reconciler.Get(ctx, key, cached)).To(Succeed())
+				g.Expect(cached.Status.ProvisioningJobs[0].State).To(Equal(osacv1alpha1.JobStateSucceeded))
+			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+
+			result, err = reconciler.Reconcile(ctx, request)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeZero())
+			Expect(k8sClient.Get(ctx, key, persisted)).To(Succeed())
+			Expect(persisted.Finalizers).NotTo(ContainElement(osacComputeInstanceFinalizer))
+			Expect(persisted.Finalizers).To(ContainElement(osacComputeInstanceFeedbackFinalizer))
+		})
+	})
+
 	Context("management-state unmanaged with deletion", func() {
 		const namespaceName = "default"
 		const tenantName = "test-tenant-unmanaged"
@@ -242,11 +312,143 @@ var _ = Describe("ComputeInstance Controller", func() {
 			}})
 			Expect(err).NotTo(HaveOccurred())
 
+			Eventually(func(g Gomega) {
+				ci := &osacv1alpha1.ComputeInstance{}
+				g.Expect(controllerReconciler.Get(ctx, key, ci)).To(Succeed())
+				g.Expect(ci.Status.Phase).To(Equal(osacv1alpha1.ComputeInstancePhaseDeleting))
+				g.Expect(ci.Finalizers).To(ContainElement(osacComputeInstanceFinalizer))
+			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, mcreconcile.Request{Request: reconcile.Request{
+				NamespacedName: key,
+			}})
+			Expect(err).NotTo(HaveOccurred())
+
 			Eventually(func() bool {
 				return errors.IsNotFound(k8sClient.Get(ctx, key, &osacv1alpha1.ComputeInstance{}))
 			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 
 			deleteTenantInNamespace(ctx, namespaceName, tenantName)
+		})
+	})
+
+	Context("recordRunningConfig", func() {
+		// runningInstance builds a ComputeInstance whose CR reports the labeled type
+		// running: phase Running, configuration applied, and a RestartRequired
+		// condition the caller controls.
+		runningInstance := func(restart metav1.ConditionStatus, present bool) *osacv1alpha1.ComputeInstance {
+			instance := &osacv1alpha1.ComputeInstance{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						osacComputeInstanceTypeNameLabel: "standard-8-32",
+					},
+				},
+			}
+			if present {
+				instance.Status.Conditions = []metav1.Condition{{
+					Type:               string(osacv1alpha1.ComputeInstanceConditionRestartRequired),
+					Status:             restart,
+					Reason:             "AsExpected",
+					LastTransitionTime: metav1.NewTime(time.Now().UTC()),
+				}}
+			}
+			instance.Status.Conditions = append(instance.Status.Conditions, metav1.Condition{
+				Type:               string(osacv1alpha1.ComputeInstanceConditionConfigurationApplied),
+				Status:             metav1.ConditionTrue,
+				Reason:             "AsExpected",
+				LastTransitionTime: metav1.NewTime(time.Now().UTC()),
+			})
+			instance.Status.Phase = osacv1alpha1.ComputeInstancePhaseRunning
+			return instance
+		}
+
+		steadyState := func(instance *osacv1alpha1.ComputeInstance) *osacv1alpha1.ComputeInstance {
+			version, err := provisioning.ComputeDesiredConfigVersion(instance.Spec)
+			Expect(err).ToNot(HaveOccurred())
+			instance.Status.DesiredConfigVersion = version
+			instance.Status.RunningConfigVersion = version
+			instance.Status.RunningInstanceTypeName = instance.Labels[osacComputeInstanceTypeNameLabel]
+			since := metav1.NewTime(time.Now().Add(-time.Hour).UTC())
+			instance.Status.RunningConfigSince = &since
+			return instance
+		}
+
+		It("records when the restart condition is explicitly false", func() {
+			instance := steadyState(runningInstance(metav1.ConditionFalse, true))
+			instance.Status.RunningConfigVersion = ""
+			instance.Status.RunningInstanceTypeName = ""
+			instance.Status.RunningConfigSince = nil
+
+			recordRunningConfig(instance)
+
+			Expect(instance.Status.RunningConfigVersion).To(Equal(instance.Status.DesiredConfigVersion))
+			Expect(instance.Status.RunningInstanceTypeName).To(Equal("standard-8-32"))
+			Expect(instance.Status.RunningConfigSince).ToNot(BeNil())
+		})
+
+		It("does not record when the restart condition is absent", func() {
+			// KubeVirt reports RestartRequired asynchronously: an absent condition
+			// vouches for nothing, so no observation is recorded yet.
+			instance := runningInstance("", false)
+			instance.Status.RunningConfigVersion = ""
+			instance.Status.RunningInstanceTypeName = ""
+			instance.Status.RunningConfigSince = nil
+
+			recordRunningConfig(instance)
+
+			Expect(instance.Status.RunningConfigVersion).To(BeEmpty())
+			Expect(instance.Status.RunningInstanceTypeName).To(BeEmpty())
+			Expect(instance.Status.RunningConfigSince).To(BeNil())
+		})
+
+		It("does not record when the restart condition is unknown", func() {
+			instance := runningInstance(metav1.ConditionUnknown, true)
+			instance.Status.RunningConfigVersion = ""
+			instance.Status.RunningInstanceTypeName = ""
+			instance.Status.RunningConfigSince = nil
+
+			recordRunningConfig(instance)
+
+			Expect(instance.Status.RunningConfigVersion).To(BeEmpty())
+			Expect(instance.Status.RunningConfigSince).To(BeNil())
+		})
+
+		It("clears the observation when a restart is required", func() {
+			// The observation predates the restart and cannot vouch for the
+			// configuration that runs after it.
+			instance := steadyState(runningInstance(metav1.ConditionTrue, true))
+
+			recordRunningConfig(instance)
+
+			Expect(instance.Status.RunningConfigVersion).To(BeEmpty())
+			Expect(instance.Status.RunningInstanceTypeName).To(BeEmpty())
+			Expect(instance.Status.RunningConfigSince).To(BeNil())
+		})
+
+		It("keeps the recorded time in the steady state", func() {
+			instance := steadyState(runningInstance(metav1.ConditionFalse, true))
+			before := *instance.Status.RunningConfigSince
+
+			recordRunningConfig(instance)
+
+			Expect(instance.Status.RunningConfigSince.Time).To(Equal(before.Time))
+		})
+
+		It("moves the stamp on a name-only resize with identical resources", func() {
+			// Two instance types with identical resources hash to the same config
+			// version: only the recorded name distinguishes them, so a resize
+			// between them must still move the stamp.
+			instance := steadyState(runningInstance(metav1.ConditionFalse, true))
+			oldSince := *instance.Status.RunningConfigSince
+			// The reconciler applied the new type: the label moved.
+			instance.Labels[osacComputeInstanceTypeNameLabel] = "standard-8-32-compatible"
+			// ...but the resources are identical, so the config version is unchanged.
+
+			recordRunningConfig(instance)
+
+			Expect(instance.Status.RunningConfigVersion).To(Equal(instance.Status.DesiredConfigVersion))
+			Expect(instance.Status.RunningInstanceTypeName).To(Equal("standard-8-32-compatible"))
+			Expect(instance.Status.RunningConfigSince.Time).To(BeTemporally(">", oldSince.Time))
 		})
 	})
 

@@ -86,6 +86,7 @@ type function struct {
 	logger                           *slog.Logger
 	hubCache                         controllers.HubCache
 	networkingHubReader              controllers.NetworkingHubReader
+	networkingCleanup                controllers.WorkloadNetworkingCleanup
 	bareMetalInstancesClient         privatev1.BareMetalInstancesClient
 	bareMetalInstanceTypesClient     privatev1.BareMetalInstanceTypesClient
 	bareMetalInstanceTemplatesClient privatev1.BareMetalInstanceTemplatesClient
@@ -144,6 +145,7 @@ func (b *FunctionBuilder) Build() (result controllers.ReconcilerFunction[*privat
 
 	object := &function{
 		logger:                           b.logger,
+		networkingCleanup:                controllers.NewWorkloadNetworkingCleanup(b.connection),
 		bareMetalInstancesClient:         privatev1.NewBareMetalInstancesClient(b.connection),
 		bareMetalInstanceTypesClient:     privatev1.NewBareMetalInstanceTypesClient(b.connection),
 		bareMetalInstanceTemplatesClient: privatev1.NewBareMetalInstanceTemplatesClient(b.connection),
@@ -176,14 +178,16 @@ func (r *function) run(ctx context.Context, bareMetalInstance *privatev1.BareMet
 	} else {
 		err = t.update(ctx)
 	}
-	var hubResolutionRetryErr error
+	var reconcileRetryErr error
 	if err != nil {
 		handled, retry := controllers.HandleResourceNetworkingHubResolutionError(err, t.setPending, t.setFailed)
 		if !handled {
-			return err
-		}
-		if retry {
-			hubResolutionRetryErr = err
+			if !controllers.IsRequeueable(err) {
+				return err
+			}
+			reconcileRetryErr = err
+		} else if retry {
+			reconcileRetryErr = err
 		}
 	}
 	updateMask := r.maskCalculator.Calculate(oldBareMetalInstance, bareMetalInstance)
@@ -195,7 +199,7 @@ func (r *function) run(ctx context.Context, bareMetalInstance *privatev1.BareMet
 	if err != nil {
 		return err
 	}
-	return hubResolutionRetryErr
+	return reconcileRetryErr
 }
 
 func (t *task) update(ctx context.Context) error {
@@ -221,7 +225,7 @@ func (t *task) update(ctx context.Context) error {
 	}
 	existingObject := object != nil
 
-	if t.bareMetalInstance.GetSpec().HasUserData() || t.bareMetalInstance.GetSpec().GetUserDataSecret() != nil {
+	if t.bareMetalInstance.GetSpec().GetUserDataSource() != nil {
 		t.userDataSecretName = fmt.Sprintf("%s%s", t.bareMetalInstance.GetId(), userDataSecretSuffix)
 	}
 
@@ -305,6 +309,9 @@ func (t *task) delete(ctx context.Context) (err error) {
 	// Do nothing if we don't know the hub yet:
 	t.hubId = t.bareMetalInstance.GetStatus().GetHub()
 	if t.hubId == "" {
+		if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.bareMetalInstance.GetId()); err != nil {
+			return err
+		}
 		t.removeFinalizer()
 		return nil
 	}
@@ -316,6 +323,9 @@ func (t *task) delete(ctx context.Context) (err error) {
 	err = t.getHub(ctx)
 	if err != nil {
 		if errors.Is(err, controllers.ErrHubNotFound) {
+			if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.bareMetalInstance.GetId()); err != nil {
+				return err
+			}
 			controllers.RemoveFinalizerOnDecommissionedHub(ctx, t.r.logger, t.hubId, "bare_metal_instance_id", t.bareMetalInstance.GetId(), t.removeFinalizer)
 			return nil
 		}
@@ -332,8 +342,14 @@ func (t *task) delete(ctx context.Context) (err error) {
 			"Bare metal instance doesn't exist",
 			slog.String("id", t.bareMetalInstance.GetId()),
 		)
+		if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.bareMetalInstance.GetId()); err != nil {
+			return err
+		}
 		t.removeFinalizer()
 		return
+	}
+	if err = controllers.ReconcileWorkloadNetworkingCleanup(ctx, t.r.networkingCleanup, t.bareMetalInstance.GetId()); err != nil {
+		return err
 	}
 
 	if object.GetDeletionTimestamp() == nil {
@@ -356,7 +372,11 @@ func (t *task) delete(ctx context.Context) (err error) {
 		)
 	}
 
-	return
+	// Kubernetes deletion is asynchronous, and the fulfillment event stream does
+	// not observe the BMFO object's finalizer progress. Keep this BMI queued until
+	// getKubeObject reports that the BMFO object is gone, then remove the
+	// fulfillment finalizer on the next reconciliation.
+	return controllers.RequeueAfterKubernetesDeletion("bare metal instance")
 }
 
 func (t *task) selectHub(ctx context.Context) error {
@@ -970,19 +990,19 @@ func (t *task) ensureUserDataSecret(ctx context.Context, owner *bmfov1alpha1.Bar
 }
 
 func (t *task) resolveUserData(ctx context.Context) (string, error) {
-	ref := t.bareMetalInstance.GetSpec().GetUserDataSecret()
+	ref := t.bareMetalInstance.GetSpec().GetUserDataSource().GetSecret()
 	if ref == nil {
-		return t.bareMetalInstance.GetSpec().GetUserData(), nil
+		return t.bareMetalInstance.GetSpec().GetUserDataSource().GetInline(), nil
 	}
 	if t.r.secretsClient == nil {
-		return "", errors.New("secrets client is required to resolve user_data_secret")
+		return "", errors.New("secrets client is required to resolve user_data_source.secret")
 	}
 	if ref.GetId() == "" {
-		return "", errors.New("user_data_secret must have an id")
+		return "", errors.New("user_data_source.secret must have an id")
 	}
 	response, err := t.r.secretsClient.Get(ctx, privatev1.SecretsGetRequest_builder{Id: ref.GetId()}.Build())
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch user_data_secret: %w", err)
+		return "", fmt.Errorf("failed to fetch user_data_source.secret: %w", err)
 	}
 	value, ok := response.GetObject().GetData()[userDataSecretKey]
 	if !ok || len(value) == 0 {

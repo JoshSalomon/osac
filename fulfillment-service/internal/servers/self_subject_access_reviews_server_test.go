@@ -202,6 +202,25 @@ var _ = Describe("SelfSubjectAccessReviews Server", func() {
 				Expect(response.GetObject().GetMetadata().GetName()).To(Equal("test-review"))
 				Expect(response.GetObject().GetMetadata().GetAnnotations()).To(HaveKeyWithValue("osac.openshift.io/tenant", "my-tenant"))
 			})
+
+			It("Rejects reserved metadata before evaluating the request", func() {
+				request := publicv1.SelfSubjectAccessReviewsCreateRequest_builder{
+					Object: publicv1.SelfSubjectAccessReview_builder{
+						Metadata: publicv1.Metadata_builder{
+							Annotations: map[string]string{"admin.osac.openshift.io/review": "private"},
+						}.Build(),
+						Spec: publicv1.SelfSubjectAccessReviewSpec_builder{
+							Service: "osac.public.v1.Clusters",
+							Method:  "List",
+						}.Build(),
+					}.Build(),
+				}.Build()
+
+				response, err := publicServer.Create(testCtx, request)
+				Expect(response).To(BeNil())
+				Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+				Expect(grpcstatus.Convert(err).Message()).To(Equal(reservedMetadataError))
+			})
 		})
 	})
 
@@ -499,6 +518,51 @@ var _ = Describe("SelfSubjectAccessReviews Server", func() {
 				response, err := privateServer.Create(testCtx, request)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(response).ToNot(BeNil())
+			})
+
+			It("Allows project viewers to check Get for a dotted project name", func() {
+				evaluator, err := auth.NewEvaluator().
+					AddEmergencyServiceAccounts([]string{}).
+					Build()
+				Expect(err).ToNot(HaveOccurred())
+
+				server, err := NewPrivateSelfSubjectAccessReviewsServer().
+					SetLogger(logger).
+					SetEvaluator(evaluator).
+					SetTenancyLogic(mockTenancyLogic).
+					Build()
+				Expect(err).ToNot(HaveOccurred())
+
+				token := &jwt.Token{
+					Valid: true,
+					Claims: jwt.MapClaims{
+						"preferred_username": "project-viewer",
+						"organization": map[string]any{
+							"my-tenant": map[string]any{
+								"groups": []any{"/parent/child/system:viewers"},
+							},
+						},
+					},
+				}
+				testCtx := auth.ContextWithToken(context.Background(), token)
+
+				request := privatev1.SelfSubjectAccessReviewsCreateRequest_builder{
+					Object: privatev1.SelfSubjectAccessReview_builder{
+						Metadata: privatev1.Metadata_builder{
+							Tenant: "my-tenant",
+							Name:   "parent.child",
+						}.Build(),
+						Spec: privatev1.SelfSubjectAccessReviewSpec_builder{
+							Service: "osac.public.v1.Projects",
+							Method:  "Get",
+						}.Build(),
+					}.Build(),
+				}.Build()
+
+				response, err := server.Create(testCtx, request)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(response.GetObject().GetStatus().GetAllowed()).To(BeTrue())
+				Expect(response.GetObject().GetMetadata().GetName()).To(Equal("parent.child"))
 			})
 
 			It("Extracts auth context from JWT token", func() {

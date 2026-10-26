@@ -34,7 +34,8 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 		ctx context.Context
 
 		// Public API client for cluster operations.
-		clustersClient publicv1.ClustersClient
+		clustersClient        publicv1.ClustersClient
+		privateClustersClient privatev1.ClustersClient
 
 		// Private API clients for fixture setup (networking resources, instance types, templates).
 		instanceTypesClient   privatev1.BareMetalInstanceTypesClient
@@ -58,6 +59,7 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 
 		// Create the clients:
 		clustersClient = publicv1.NewClustersClient(tool.ExternalView().UserConn())
+		privateClustersClient = privatev1.NewClustersClient(tool.InternalView().AdminConn())
 		instanceTypesClient = privatev1.NewBareMetalInstanceTypesClient(tool.InternalView().AdminConn())
 		templatesClient = privatev1.NewClusterTemplatesClient(tool.InternalView().AdminConn())
 		networkClassesClient = privatev1.NewNetworkClassesClient(tool.InternalView().AdminConn())
@@ -74,7 +76,7 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 				}.Build(),
 				Spec: privatev1.BareMetalInstanceTypeSpec_builder{
 					Hardware: privatev1.BareMetalHardwareSpec_builder{
-						Cpu:    privatev1.BareMetalCPUSpec_builder{Cores: 32, Architecture: "x86_64", ThreadsPerCore: 2}.Build(),
+						Cpu:    privatev1.BareMetalCPUSpec_builder{Cores: 32, Architecture: "amd64", ThreadsPerCore: 2}.Build(),
 						Memory: privatev1.BareMetalMemorySpec_builder{TotalGb: 128}.Build(),
 						NetworkPorts: []*privatev1.BareMetalNetworkPortSpec{
 							privatev1.BareMetalNetworkPortSpec_builder{
@@ -127,10 +129,8 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		networkClassId = ncResp.GetObject().GetId()
-		DeferCleanup(func() {
-			_, _ = networkClassesClient.Delete(ctx, privatev1.NetworkClassesDeleteRequest_builder{
-				Id: networkClassId,
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupNetworkClassFixture(cleanupCtx, networkClassesClient, networkClassId)).To(Succeed())
 		})
 
 		// Create a VirtualNetwork:
@@ -150,10 +150,8 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() {
-			_, _ = virtualNetworksClient.Delete(ctx, privatev1.VirtualNetworksDeleteRequest_builder{
-				Id: virtualNetworkId,
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupVirtualNetworkFixture(cleanupCtx, virtualNetworksClient, virtualNetworkId)).To(Succeed())
 		})
 
 		// Set VirtualNetwork to READY state. In IT there is no osac-operator feedback controller.
@@ -175,10 +173,8 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() {
-			_, _ = subnetsClient.Delete(ctx, privatev1.SubnetsDeleteRequest_builder{
-				Id: subnetId,
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupSubnetFixture(cleanupCtx, subnetsClient, subnetId)).To(Succeed())
 		})
 
 		// Wait for the subnet reconciler to reach PENDING, then set to READY:
@@ -198,10 +194,8 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		securityGroupId = sgResp.GetObject().GetId()
-		DeferCleanup(func() {
-			_, _ = securityGroupsClient.Delete(ctx, privatev1.SecurityGroupsDeleteRequest_builder{
-				Id: securityGroupId,
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupSecurityGroupFixture(cleanupCtx, securityGroupsClient, securityGroupId)).To(Succeed())
 		})
 
 		// Wait for the security group reconciler to reach PENDING, then set to READY:
@@ -229,10 +223,8 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		object := createResponse.GetObject()
-		DeferCleanup(func() {
-			_, _ = clustersClient.Delete(ctx, publicv1.ClustersDeleteRequest_builder{
-				Id: object.GetId(),
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupClusterFixture(cleanupCtx, clustersClient, privateClustersClient, object.GetId())).To(Succeed())
 		})
 
 		// Verify the network attachment is set correctly via Get:
@@ -245,6 +237,50 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 		Expect(spec.GetNetworkAttachment().GetSubnet().GetId()).To(Equal(subnetId))
 		Expect(spec.GetNetworkAttachment().GetSecurityGroups()).To(HaveLen(1))
 		Expect(spec.GetNetworkAttachment().GetSecurityGroups()[0].GetId()).To(Equal(securityGroupId))
+	})
+
+	It("Uses tenant defaults when network_attachment is omitted", func() {
+		// Seed READY tenant default networking (default Subnet + SecurityGroup
+		// and backing VirtualNetwork) for the suite tenant:
+		ensureTenantDefaultNetworkingFixture(ctx, usersGroup, "")
+		network := getTenantDefaultNetworkFixture(ctx, usersGroup, "")
+
+		// Create the cluster without any network attachment:
+		createResponse, err := clustersClient.Create(ctx, publicv1.ClustersCreateRequest_builder{
+			Object: publicv1.Cluster_builder{
+				Metadata: publicv1.Metadata_builder{
+					Name: fmt.Sprintf("test-cluster-%s", uuid.New()[24:32]),
+				}.Build(),
+				Spec: publicv1.ClusterSpec_builder{
+					Template: publicv1.ClusterTemplateReference_builder{Id: templateId}.Build(),
+					NodeSets: testClusterNodeSets(bmitName, 3),
+				}.Build(),
+			}.Build(),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		object := createResponse.GetObject()
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupClusterFixture(cleanupCtx, clustersClient, privateClustersClient, object.GetId())).To(Succeed())
+		})
+
+		// The omitted attachment must resolve to the tenant default Subnet and
+		// SecurityGroup:
+		spec := object.GetSpec()
+		Expect(spec.GetNetworkAttachment()).ToNot(BeNil())
+		Expect(spec.GetNetworkAttachment().GetSubnet().GetId()).To(Equal(network.subnetID))
+		Expect(spec.GetNetworkAttachment().GetSecurityGroups()).To(HaveLen(1))
+		Expect(spec.GetNetworkAttachment().GetSecurityGroups()[0].GetId()).To(Equal(network.securityGroupID))
+
+		// The resolved defaults must survive public Get:
+		getResponse, err := clustersClient.Get(ctx, publicv1.ClustersGetRequest_builder{
+			Id: object.GetId(),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		spec = getResponse.GetObject().GetSpec()
+		Expect(spec.GetNetworkAttachment()).ToNot(BeNil())
+		Expect(spec.GetNetworkAttachment().GetSubnet().GetId()).To(Equal(network.subnetID))
+		Expect(spec.GetNetworkAttachment().GetSecurityGroups()).To(HaveLen(1))
+		Expect(spec.GetNetworkAttachment().GetSecurityGroups()[0].GetId()).To(Equal(network.securityGroupID))
 	})
 
 	It("Rejects cluster creation when the referenced subnet is not in READY state", func() {
@@ -264,10 +300,10 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() {
-			_, _ = subnetsClient.Delete(ctx, privatev1.SubnetsDeleteRequest_builder{
-				Id: pendingSubnetId,
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			// Subnet deletion is rejected while any SecurityGroup references its VirtualNetwork.
+			Expect(cleanupSecurityGroupFixture(cleanupCtx, securityGroupsClient, securityGroupId)).To(Succeed())
+			Expect(cleanupSubnetFixture(cleanupCtx, subnetsClient, pendingSubnetId)).To(Succeed())
 		})
 
 		// Wait for the subnet to reach PENDING so the server can find it:
@@ -342,10 +378,8 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 			}.Build(),
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() {
-			_, _ = virtualNetworksClient.Delete(ctx, privatev1.VirtualNetworksDeleteRequest_builder{
-				Id: crossVnId,
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupVirtualNetworkFixture(cleanupCtx, virtualNetworksClient, crossVnId)).To(Succeed())
 		})
 
 		// Set the second VirtualNetwork to READY:
@@ -365,10 +399,8 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		crossSgId := crossSgResp.GetObject().GetId()
-		DeferCleanup(func() {
-			_, _ = securityGroupsClient.Delete(ctx, privatev1.SecurityGroupsDeleteRequest_builder{
-				Id: crossSgId,
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupSecurityGroupFixture(cleanupCtx, securityGroupsClient, crossSgId)).To(Succeed())
 		})
 
 		// Wait for the cross-VN security group to reach PENDING, then set to READY:
@@ -400,6 +432,31 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 	})
 
 	It("Rejects updating the subnet in network attachment after cluster creation", func() {
+		// Prepare the replacement before cluster creation so cluster state changes
+		// cannot race the immutability assertion.
+		otherSubnetId := fmt.Sprintf("test-other-subnet-%s", uuid.New())
+		_, err := subnetsClient.Create(ctx, privatev1.SubnetsCreateRequest_builder{
+			Object: privatev1.Subnet_builder{
+				Metadata: privatev1.Metadata_builder{
+					Name:   fmt.Sprintf("test-other-sub-%s", uuid.New()[24:32]),
+					Tenant: usersGroup,
+				}.Build(),
+				Id: otherSubnetId,
+				Spec: privatev1.SubnetSpec_builder{
+					VirtualNetwork: privatev1.VirtualNetworkLocalReference_builder{Id: virtualNetworkId}.Build(),
+					Ipv4Cidr:       new("10.100.3.0/24"),
+				}.Build(),
+			}.Build(),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupSecurityGroupFixture(cleanupCtx, securityGroupsClient, securityGroupId)).To(Succeed())
+			Expect(cleanupSubnetFixture(cleanupCtx, subnetsClient, otherSubnetId)).To(Succeed())
+		})
+
+		// Wait for the second subnet to reach PENDING, then set to READY:
+		setSubnetReady(ctx, subnetsClient, otherSubnetId)
+
 		// Create a cluster with the shared subnet:
 		createResponse, err := clustersClient.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
@@ -417,36 +474,9 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		object := createResponse.GetObject()
-		DeferCleanup(func() {
-			_, _ = clustersClient.Delete(ctx, publicv1.ClustersDeleteRequest_builder{
-				Id: object.GetId(),
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupClusterFixture(cleanupCtx, clustersClient, privateClustersClient, object.GetId())).To(Succeed())
 		})
-
-		// Create a second READY subnet to attempt switching to:
-		otherSubnetId := fmt.Sprintf("test-other-subnet-%s", uuid.New())
-		_, err = subnetsClient.Create(ctx, privatev1.SubnetsCreateRequest_builder{
-			Object: privatev1.Subnet_builder{
-				Metadata: privatev1.Metadata_builder{
-					Name:   fmt.Sprintf("test-other-sub-%s", uuid.New()[24:32]),
-					Tenant: usersGroup,
-				}.Build(),
-				Id: otherSubnetId,
-				Spec: privatev1.SubnetSpec_builder{
-					VirtualNetwork: privatev1.VirtualNetworkLocalReference_builder{Id: virtualNetworkId}.Build(),
-					Ipv4Cidr:       new("10.100.3.0/24"),
-				}.Build(),
-			}.Build(),
-		}.Build())
-		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() {
-			_, _ = subnetsClient.Delete(ctx, privatev1.SubnetsDeleteRequest_builder{
-				Id: otherSubnetId,
-			}.Build())
-		})
-
-		// Wait for the second subnet to reach PENDING, then set to READY:
-		setSubnetReady(ctx, subnetsClient, otherSubnetId)
 
 		// Attempt to update the cluster's network attachment subnet:
 		_, err = clustersClient.Update(ctx, publicv1.ClustersUpdateRequest_builder{
@@ -473,6 +503,25 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 	})
 
 	It("Rejects updating the security groups in network attachment after cluster creation", func() {
+		By("creating a replacement security group before the cluster")
+		otherSgResp, err := securityGroupsClient.Create(ctx, privatev1.SecurityGroupsCreateRequest_builder{
+			Object: privatev1.SecurityGroup_builder{
+				Metadata: privatev1.Metadata_builder{
+					Name:   fmt.Sprintf("test-sg-%s", uuid.New()[24:32]),
+					Tenant: usersGroup,
+				}.Build(),
+				Spec: privatev1.SecurityGroupSpec_builder{
+					VirtualNetwork: privatev1.VirtualNetworkLocalReference_builder{Id: virtualNetworkId}.Build(),
+				}.Build(),
+			}.Build(),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		otherSgId := otherSgResp.GetObject().GetId()
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupSecurityGroupFixture(cleanupCtx, securityGroupsClient, otherSgId)).To(Succeed())
+		})
+		setSecurityGroupReady(ctx, securityGroupsClient, otherSgId)
+
 		By("creating a cluster with a subnet and security group attachment")
 		createResponse, err := clustersClient.Create(ctx, publicv1.ClustersCreateRequest_builder{
 			Object: publicv1.Cluster_builder{
@@ -493,32 +542,13 @@ var _ = Describe("Cluster with ClusterNetworkAttachment", func() {
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		object := createResponse.GetObject()
-		DeferCleanup(func() {
-			_, _ = clustersClient.Delete(ctx, publicv1.ClustersDeleteRequest_builder{
-				Id: object.GetId(),
-			}.Build())
+		DeferCleanup(func(cleanupCtx context.Context) {
+			Expect(cleanupClusterFixture(
+				cleanupCtx, clustersClient, privateClustersClient, object.GetId(),
+			)).To(Succeed())
 		})
 
 		By("attempting to replace the attachment security groups")
-		otherSgResp, err := securityGroupsClient.Create(ctx, privatev1.SecurityGroupsCreateRequest_builder{
-			Object: privatev1.SecurityGroup_builder{
-				Metadata: privatev1.Metadata_builder{
-					Name:   fmt.Sprintf("test-sg-%s", uuid.New()[24:32]),
-					Tenant: usersGroup,
-				}.Build(),
-				Spec: privatev1.SecurityGroupSpec_builder{
-					VirtualNetwork: privatev1.VirtualNetworkLocalReference_builder{Id: virtualNetworkId}.Build(),
-				}.Build(),
-			}.Build(),
-		}.Build())
-		Expect(err).ToNot(HaveOccurred())
-		otherSgId := otherSgResp.GetObject().GetId()
-		DeferCleanup(func() {
-			_, _ = securityGroupsClient.Delete(ctx, privatev1.SecurityGroupsDeleteRequest_builder{
-				Id: otherSgId,
-			}.Build())
-		})
-		setSecurityGroupReady(ctx, securityGroupsClient, otherSgId)
 
 		_, err = clustersClient.Update(ctx, publicv1.ClustersUpdateRequest_builder{
 			Object: publicv1.Cluster_builder{

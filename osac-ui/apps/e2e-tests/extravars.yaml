@@ -1,0 +1,51 @@
+# Non-sensitive seed values for the VMaaS UI tests.
+#
+# The deployment URL and Keycloak credentials must be supplied through
+# OSAC_UI_BASE_URL, OSAC_USERNAME, and OSAC_PASSWORD.
+
+tenant_name: 'tenant1'
+
+catalog:
+  name: 'catalog-item-e2e'
+  template: 'osac.templates.ocp_virt_vm'
+  title: 'CLI catalog item'
+  description: 'CLI-created catalog item for E2E testing.'
+  type: 'Virtual Machine'
+  status: 'Live'
+  usage: 'Global public'
+  fields:
+    instance_type:
+      name: 'u1-medium'
+      shared: true
+      vcpus: 4
+      memory_gib: 8
+    boot_disk:
+      size_gib: 80
+    disk_image:
+      name: 'fedora'
+      shared: true
+
+instance_type:
+  name: 'instance-type-e2e'
+  description: 'Instance type created by e2e test'
+  vcpus: 4
+  memory_gib: 16
+  gpu:
+    count: 1
+    resource_name: 'nvidia.com/A100'
+    pci_device_selector: '10DE:20B0'
+
+disk_image:
+  # Playwright appends a per-run suffix so teardown only targets this run's image.
+  name: 'disk-image-e2e'
+  source_type: 'Registry'
+  source_ref: 'quay.io/containerdisks/fedora:41'
+  guest_os_family: 'Linux'
+  architectures:
+    - 'amd64'
+  scope: 'Global'
+
+lifecycle_actions:
+  - 'Deprecate'
+  - 'Obsolete'
+  - 'Reactivate'

@@ -22,6 +22,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	"github.com/osac-project/osac/fulfillment-service/internal/validation"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
@@ -37,6 +38,7 @@ func validateAndCanonicalizeBareMetalInstanceCatalogItemPolicies(
 	template *privatev1.BareMetalInstanceTemplate,
 	bareMetalInstanceTypesDao *dao.GenericDAO[*privatev1.BareMetalInstanceType],
 	diskImagesDao *dao.GenericDAO[*privatev1.DiskImage],
+	secretsDao *dao.GenericDAO[*privatev1.Secret],
 	subnetsDao *dao.GenericDAO[*privatev1.Subnet],
 	virtualNetworksDao *dao.GenericDAO[*privatev1.VirtualNetwork],
 	networkClassesDao *dao.GenericDAO[*privatev1.NetworkClass],
@@ -58,14 +60,62 @@ func validateAndCanonicalizeBareMetalInstanceCatalogItemPolicies(
 		return nil, err
 	}
 
-	warnings, err := validateCatalogItemDiskImagePolicy(ctx, scope, fields.GetDiskImage(), diskImagesDao)
+	warnings, err := validateBareMetalInstanceCatalogItemDiskImagePolicy(ctx, scope, fields, template, bareMetalInstanceTypesDao, diskImagesDao)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCatalogItemUserDataSourcePolicy(ctx, scope, fields.GetUserDataSource(), secretsDao, validateBareMetalUserData); err != nil {
 		return nil, err
 	}
 
 	if err := validateBareMetalInstanceCatalogItemNetworkPolicy(ctx, logger, item.GetMetadata(), scope, fields.GetNetworkAttachments(), template, fields.GetInstanceType(),
 		bareMetalInstanceTypesDao, subnetsDao, virtualNetworksDao, networkClassesDao, securityGroupsDao); err != nil {
 		return nil, err
+	}
+	return warnings, nil
+}
+
+// validateBareMetalInstanceCatalogItemDiskImagePolicy checks the image's lifecycle and
+// compatibility with the offering's type. Lock the type before the image, including when
+// inherited from the template, to preserve the lock order used by instance admission.
+func validateBareMetalInstanceCatalogItemDiskImagePolicy(
+	ctx context.Context,
+	scope referenceScope,
+	fields *privatev1.BareMetalInstanceCatalogItemFields,
+	template *privatev1.BareMetalInstanceTemplate,
+	instanceTypesDao *dao.GenericDAO[*privatev1.BareMetalInstanceType],
+	diskImagesDao *dao.GenericDAO[*privatev1.DiskImage],
+) ([]string, error) {
+	imagePolicy, err := decodeDiskImageReferencePolicy(fields.GetDiskImage())
+	if err != nil {
+		return nil, catalogItemPolicyError("fields.disk_image", err.Error())
+	}
+	typeRef, typeSource, err := effectiveBareMetalInstanceTypeReference(template, fields.GetInstanceType())
+	if err != nil {
+		return nil, catalogItemPolicyError("fields.instance_type", err.Error())
+	}
+	// A caller-selected type or image is checked when the BareMetalInstance is created.
+	if typeRef == nil || (!imagePolicy.hasLocked && !imagePolicy.hasDefault) {
+		_, warnings, err := validateCatalogItemDiskImagePolicy(ctx, scope, fields.GetDiskImage(), diskImagesDao)
+		return warnings, err
+	}
+	if err := validatePlatformReference(typeRef, "bare metal instance type", typeSource); err != nil {
+		return nil, err
+	}
+	instanceType, err := resolveLockedPlatformResource(ctx, instanceTypesDao, typeRef.GetId(), typeRef.GetName(),
+		"bare metal instance type", typeSource, grpccodes.NotFound)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateResourceNotDeleted("bare metal instance type", refKey(typeRef), typeSource, instanceType.GetMetadata()); err != nil {
+		return nil, err
+	}
+	diskImage, warnings, err := validateCatalogItemDiskImagePolicy(ctx, scope, fields.GetDiskImage(), diskImagesDao)
+	if err != nil {
+		return nil, err
+	}
+	if err := validation.ValidateBareMetalDiskImageArchitecture(instanceType, diskImage); err != nil {
+		return nil, grpcstatus.Error(grpccodes.InvalidArgument, err.Error())
 	}
 	return warnings, nil
 }
@@ -85,8 +135,8 @@ func applyBareMetalInstanceCatalogItemPolicies(
 	if err := applyPolicy(fields.GetSshPublicKey(), spec.HasSshPublicKey(), spec.SetSshPublicKey, decodeStringPolicy, identity[string]); err != nil {
 		return fmt.Errorf("ssh_public_key: %w", err)
 	}
-	if err := applyPolicy(fields.GetUserData(), spec.HasUserData(), spec.SetUserData, decodeStringPolicy, identity[string]); err != nil {
-		return fmt.Errorf("user_data: %w", err)
+	if err := applyPolicy(fields.GetUserDataSource(), spec.GetUserDataSource() != nil, spec.SetUserDataSource, decodeUserDataSourcePolicy, cloneMessage[*privatev1.UserDataSource]); err != nil {
+		return fmt.Errorf("user_data_source: %w", err)
 	}
 	if err := applyPolicy(fields.GetRunStrategy(), spec.HasRunStrategy(), spec.SetRunStrategy, decodeBareMetalInstanceRunStrategyPolicy, identity[privatev1.BareMetalInstanceRunStrategy]); err != nil {
 		return fmt.Errorf("run_strategy: %w", err)
@@ -109,11 +159,6 @@ func applyBareMetalInstanceCatalogItemPolicies(
 // validateBareMetalInstanceCatalogItemScalarPolicies checks supported scalar values and returns the first invalid policy.
 func validateBareMetalInstanceCatalogItemScalarPolicies(fields *privatev1.BareMetalInstanceCatalogItemFields) error {
 	if err := validateCatalogItemStringPolicy(fields.GetSshPublicKey(), "fields.ssh_public_key", validateOpenSSHPublicKey); err != nil {
-		return err
-	}
-	if err := validateCatalogItemStringPolicy(fields.GetUserData(), "fields.user_data", func(value string) error {
-		return validateBareMetalUserData([]byte(value))
-	}); err != nil {
 		return err
 	}
 	if _, err := decodeBareMetalInstanceRunStrategyPolicy(fields.GetRunStrategy()); err != nil {
@@ -269,7 +314,7 @@ func validateBareMetalInstanceCatalogItemNetworkPolicy(
 	return nil
 }
 
-// effectiveBareMetalInstanceTypeReference returns the instance type that governs network attachment
+// effectiveBareMetalInstanceTypeReference returns the instance type that governs compatibility
 // validation. A catalog item's locked or editable default overrides the template's default. An
 // editable policy without a default defers type selection to BMI creation.
 func effectiveBareMetalInstanceTypeReference(

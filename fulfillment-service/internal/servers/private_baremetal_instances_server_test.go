@@ -60,7 +60,10 @@ func bareMetalInstanceTypeFixture(id string, ports ...*privatev1.BareMetalNetwor
 			Tenant: auth.SharedTenant,
 		}.Build(),
 		Spec: privatev1.BareMetalInstanceTypeSpec_builder{
-			Hardware: privatev1.BareMetalHardwareSpec_builder{NetworkPorts: ports}.Build(),
+			Hardware: privatev1.BareMetalHardwareSpec_builder{
+				Cpu:          privatev1.BareMetalCPUSpec_builder{Cores: 4, ThreadsPerCore: 2, Architecture: "amd64"}.Build(),
+				NetworkPorts: ports,
+			}.Build(),
 			HostLabelSelector: privatev1.BareMetalLabelSelector_builder{
 				MatchLabels: map[string]string{"resourceClass": id},
 			}.Build(),
@@ -193,6 +196,7 @@ var _ = Describe("Private bare metal instances server", func() {
 					}.Build(),
 					Status: privatev1.ExternalIPPoolStatus_builder{
 						State:     privatev1.ExternalIPPoolState_EXTERNAL_IP_POOL_STATE_READY,
+						Total:     10,
 						Available: 10,
 					}.Build(),
 				}.Build(),
@@ -844,14 +848,14 @@ var _ = Describe("Private bare metal instances server", func() {
 					Spec: privatev1.BareMetalInstanceSpec_builder{
 						DiskImage:      privatev1.DiskImageReference_builder{Id: "default-bmi-disk-image"}.Build(),
 						Template:       privatev1.BareMetalInstanceTemplateReference_builder{Id: templateID}.Build(),
-						UserDataSecret: privatev1.SecretLocalReference_builder{Name: secret.GetObject().GetMetadata().GetName()}.Build(),
+						UserDataSource: privatev1.UserDataSource_builder{Secret: privatev1.SecretLocalReference_builder{Name: secret.GetObject().GetMetadata().GetName()}.Build()}.Build(),
 					}.Build(),
 				}.Build(),
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response.GetObject().GetSpec().GetTemplate().GetId()).To(Equal(templateID))
-			Expect(response.GetObject().GetSpec().GetUserDataSecret().GetId()).To(Equal(secret.GetObject().GetId()))
-			Expect(response.GetObject().GetSpec().GetUserDataSecret().GetName()).To(Equal(secret.GetObject().GetMetadata().GetName()))
+			Expect(response.GetObject().GetSpec().GetUserDataSource().GetSecret().GetId()).To(Equal(secret.GetObject().GetId()))
+			Expect(response.GetObject().GetSpec().GetUserDataSource().GetSecret().GetName()).To(Equal(secret.GetObject().GetMetadata().GetName()))
 		})
 
 		It("Rejects direct template that does not exist", func() {
@@ -919,8 +923,8 @@ var _ = Describe("Private bare metal instances server", func() {
 						Name: fmt.Sprintf("test-%s", uuid.NewString()[:8]),
 					}.Build(),
 					Spec: privatev1.BareMetalInstanceSpec_builder{
-						CatalogItem: privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
-						UserData:    new(bigData),
+						CatalogItem:    privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
+						UserDataSource: privatev1.UserDataSource_builder{Inline: new(bigData)}.Build(),
 					}.Build(),
 				}.Build(),
 			}.Build())
@@ -928,7 +932,7 @@ var _ = Describe("Private bare metal instances server", func() {
 			status, ok := grpcstatus.FromError(err)
 			Expect(ok).To(BeTrue())
 			Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
-			Expect(status.Message()).To(ContainSubstring("spec.user_data"))
+			Expect(status.Message()).To(ContainSubstring("spec.user_data_source"))
 			Expect(status.Message()).To(ContainSubstring("exceeds the maximum"))
 		})
 
@@ -940,9 +944,9 @@ var _ = Describe("Private bare metal instances server", func() {
 						Name: fmt.Sprintf("test-%s", uuid.NewString()[:8]),
 					}.Build(),
 					Spec: privatev1.BareMetalInstanceSpec_builder{
-						DiskImage:   privatev1.DiskImageReference_builder{Id: "default-bmi-disk-image"}.Build(),
-						CatalogItem: privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
-						UserData:    new(exactData),
+						DiskImage:      privatev1.DiskImageReference_builder{Id: "default-bmi-disk-image"}.Build(),
+						CatalogItem:    privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
+						UserDataSource: privatev1.UserDataSource_builder{Inline: new(exactData)}.Build(),
 					}.Build(),
 				}.Build(),
 			}.Build())
@@ -968,14 +972,14 @@ var _ = Describe("Private bare metal instances server", func() {
 					Spec: privatev1.BareMetalInstanceSpec_builder{
 						DiskImage:      privatev1.DiskImageReference_builder{Id: "default-bmi-disk-image"}.Build(),
 						CatalogItem:    privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
-						UserDataSecret: privatev1.SecretLocalReference_builder{Id: secret.GetObject().GetId()}.Build(),
+						UserDataSource: privatev1.UserDataSource_builder{Secret: privatev1.SecretLocalReference_builder{Id: secret.GetObject().GetId()}.Build()}.Build(),
 					}.Build(),
 				}.Build(),
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		It("Rejects create when neither ssh_public_key nor user_data is provided", func() {
+		It("Rejects create when neither ssh_public_key nor user_data_source.inline is provided", func() {
 			_, err := server.Create(ctx, privatev1.BareMetalInstancesCreateRequest_builder{
 				Object: privatev1.BareMetalInstance_builder{
 					Metadata: privatev1.Metadata_builder{
@@ -1245,7 +1249,7 @@ var _ = Describe("Private bare metal instances server", func() {
 			Expect(status.Message()).To(ContainSubstring("ssh_public_key is immutable"))
 		})
 
-		It("Rejects PATCH that changes user_data", func() {
+		It("Rejects PATCH that changes user_data_source.inline", func() {
 			userData := "original user data"
 			createResponse, err := server.Create(ctx, privatev1.BareMetalInstancesCreateRequest_builder{
 				Object: privatev1.BareMetalInstance_builder{
@@ -1253,9 +1257,9 @@ var _ = Describe("Private bare metal instances server", func() {
 						Name: "test-baremetal-instance",
 					}.Build(),
 					Spec: privatev1.BareMetalInstanceSpec_builder{
-						DiskImage:   privatev1.DiskImageReference_builder{Id: "default-bmi-disk-image"}.Build(),
-						CatalogItem: privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
-						UserData:    new(userData),
+						DiskImage:      privatev1.DiskImageReference_builder{Id: "default-bmi-disk-image"}.Build(),
+						CatalogItem:    privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
+						UserDataSource: privatev1.UserDataSource_builder{Inline: new(userData)}.Build(),
 					}.Build(),
 				}.Build(),
 			}.Build())
@@ -1267,19 +1271,19 @@ var _ = Describe("Private bare metal instances server", func() {
 				Object: privatev1.BareMetalInstance_builder{
 					Id: object.GetId(),
 					Spec: privatev1.BareMetalInstanceSpec_builder{
-						CatalogItem: privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
-						UserData:    new(newData),
+						CatalogItem:    privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
+						UserDataSource: privatev1.UserDataSource_builder{Inline: new(newData)}.Build(),
 					}.Build(),
 				}.Build(),
 				UpdateMask: &fieldmaskpb.FieldMask{
-					Paths: []string{"spec.user_data"},
+					Paths: []string{"spec.user_data_source"},
 				},
 			}.Build())
 			Expect(err).To(HaveOccurred())
 			status, ok := grpcstatus.FromError(err)
 			Expect(ok).To(BeTrue())
 			Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
-			Expect(status.Message()).To(ContainSubstring("user_data is immutable"))
+			Expect(status.Message()).To(ContainSubstring("user_data_source.inline is immutable"))
 		})
 
 		It("Allows PATCH that does not touch immutable fields", func() {
@@ -1881,7 +1885,7 @@ var _ = Describe("Private bare metal instances server", func() {
 			Expect(getResponse.GetObject().GetSpec().GetAutoExternalIpAttachment()).To(BeTrue())
 		})
 
-		It("auto_external_ip_attachment creates ExternalIP and ExternalIPAttachment in DB", func() {
+		It("auto_external_ip_attachment leaves attachment creation to the ready BareMetalInstance reconciler", func() {
 			response, err := server.Create(ctx, privatev1.BareMetalInstancesCreateRequest_builder{
 				Object: privatev1.BareMetalInstance_builder{
 					Metadata: privatev1.Metadata_builder{
@@ -1907,6 +1911,8 @@ var _ = Describe("Private bare metal instances server", func() {
 				Do(ctx)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(eipList.GetItems()).To(HaveLen(1))
+			Expect(eipList.GetItems()[0].GetMetadata().GetLabels()).ToNot(HaveKey(autoAttachmentDeferredLabel))
+			Expect(eipList.GetItems()[0].GetMetadata().GetLabels()[autoCreatedKindLabel]).To(Equal("bare_metal_instance"))
 
 			attDao, err := dao.NewGenericDAO[*privatev1.ExternalIPAttachment]().
 				SetLogger(logger).SetTenancyLogic(tenancy).Build()
@@ -1916,9 +1922,47 @@ var _ = Describe("Private bare metal instances server", func() {
 				SetFilter(fmt.Sprintf("this.metadata.labels['osac.openshift.io/auto-created-for'] == '%s'", bmiID)).
 				Do(ctx)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(attList.GetItems()).To(HaveLen(1))
-			Expect(attList.GetItems()[0].GetSpec().GetBaremetalInstance().GetId()).To(Equal(bmiID))
+			Expect(attList.GetItems()).To(BeEmpty())
 
+		})
+
+		It("leaves automatic attachment creation to the ready BareMetalInstance reconciler and cleans up an unattached ExternalIP", func() {
+			response, err := server.Create(ctx, privatev1.BareMetalInstancesCreateRequest_builder{
+				Object: privatev1.BareMetalInstance_builder{
+					Metadata: privatev1.Metadata_builder{Name: fmt.Sprintf("deferred-%s", uuid.NewString()[:8])}.Build(),
+					Spec: privatev1.BareMetalInstanceSpec_builder{
+						DiskImage:                privatev1.DiskImageReference_builder{Id: "default-bmi-disk-image"}.Build(),
+						CatalogItem:              privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalogItemID}.Build(),
+						SshPublicKey:             new(testSSHPublicKey),
+						AutoExternalIpAttachment: proto.Bool(true),
+					}.Build(),
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			bmiID := response.GetObject().GetId()
+
+			eipDao, err := dao.NewGenericDAO[*privatev1.ExternalIP]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+			Expect(err).ToNot(HaveOccurred())
+			filter := fmt.Sprintf("this.metadata.labels['osac.openshift.io/auto-created-for'] == '%s'", bmiID)
+			eipList, err := eipDao.List().SetFilter(filter).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(eipList.GetItems()).To(HaveLen(1))
+			Expect(eipList.GetItems()[0].GetMetadata().GetLabels()).ToNot(HaveKey(autoAttachmentDeferredLabel))
+			Expect(eipList.GetItems()[0].GetMetadata().GetLabels()[autoCreatedKindLabel]).To(Equal("bare_metal_instance"))
+			Expect(eipList.GetItems()[0].GetMetadata().GetAnnotations()[ownerReferenceAnnotation]).To(Equal(bmiID))
+			Expect(eipList.GetItems()[0].GetMetadata().GetAnnotations()["osac.openshift.io/tenant"]).To(Equal(testTenant))
+
+			eiaDao, err := dao.NewGenericDAO[*privatev1.ExternalIPAttachment]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+			Expect(err).ToNot(HaveOccurred())
+			eiaList, err := eiaDao.List().SetFilter(filter).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(eiaList.GetItems()).To(BeEmpty())
+
+			_, err = server.Delete(ctx, privatev1.BareMetalInstancesDeleteRequest_builder{Id: bmiID}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			eipList, err = eipDao.List().SetFilter(filter).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(eipList.GetItems()).To(BeEmpty())
 		})
 
 		It("Rejects PATCH that changes auto_external_ip_attachment", func() {
@@ -1954,7 +1998,8 @@ var _ = Describe("Private bare metal instances server", func() {
 				SetFilter(fmt.Sprintf("this.metadata.labels['%s'] == '%s'", autoCreatedForLabel, object.GetId())).
 				Do(ctx)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(attList.GetItems()).To(HaveLen(1))
+			// Attachment creation is deferred until the BareMetalInstance is Ready.
+			Expect(attList.GetItems()).To(BeEmpty())
 
 			poolDao, err := dao.NewGenericDAO[*privatev1.ExternalIPPool]().
 				SetLogger(logger).SetTenancyLogic(tenancy).Build()
@@ -1991,7 +2036,7 @@ var _ = Describe("Private bare metal instances server", func() {
 				SetFilter(fmt.Sprintf("this.metadata.labels['%s'] == '%s'", autoCreatedForLabel, object.GetId())).
 				Do(ctx)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(attList.GetItems()).To(HaveLen(1))
+			Expect(attList.GetItems()).To(BeEmpty())
 			poolList, err = poolDao.List().Do(ctx)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(poolList.GetItems()).To(HaveLen(1))

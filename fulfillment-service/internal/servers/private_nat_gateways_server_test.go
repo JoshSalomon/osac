@@ -23,6 +23,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
@@ -136,7 +137,10 @@ var _ = Describe("Private NAT gateways server", func() {
 				Spec: privatev1.VirtualNetworkSpec_builder{
 					NetworkClass: privatev1.NetworkClassReference_builder{Id: nc.GetId()}.Build(),
 				}.Build(),
-				Status: privatev1.VirtualNetworkStatus_builder{Hub: "network-hub-a"}.Build(),
+				Status: privatev1.VirtualNetworkStatus_builder{
+					State: privatev1.VirtualNetworkState_VIRTUAL_NETWORK_STATE_READY,
+					Hub:   "network-hub-a",
+				}.Build(),
 			}.Build(),
 		).Do(ctx)
 		Expect(err).ToNot(HaveOccurred())
@@ -155,6 +159,9 @@ var _ = Describe("Private NAT gateways server", func() {
 				}.Build(),
 				Spec: privatev1.VirtualNetworkSpec_builder{
 					NetworkClass: privatev1.NetworkClassReference_builder{Id: nc.GetId()}.Build(),
+				}.Build(),
+				Status: privatev1.VirtualNetworkStatus_builder{
+					State: privatev1.VirtualNetworkState_VIRTUAL_NETWORK_STATE_READY,
 				}.Build(),
 			}.Build(),
 		).Do(ctx)
@@ -418,15 +425,16 @@ var _ = Describe("Private NAT gateways server", func() {
 			object := privatev1.NATGateway_builder{
 				Id: createResponse.GetObject().GetId(),
 				Status: privatev1.NATGatewayStatus_builder{
-					State:   privatev1.NATGatewayState_NAT_GATEWAY_STATE_FAILED,
-					Message: &message,
-					Hub:     "hub-1",
+					State:               privatev1.NATGatewayState_NAT_GATEWAY_STATE_FAILED,
+					StateTransitionTime: timestamppb.Now(),
+					Message:             &message,
+					Hub:                 "hub-1",
 				}.Build(),
 			}.Build()
 			response, err := natGatewaysServer.Update(ctx, privatev1.NATGatewaysUpdateRequest_builder{
 				Object: object,
 				UpdateMask: &fieldmaskpb.FieldMask{
-					Paths: []string{"status.state", "status.message", "status.hub"},
+					Paths: []string{"status.state", "status.state_transition_time", "status.message", "status.hub"},
 				},
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
@@ -607,6 +615,43 @@ var _ = Describe("Private NAT gateways server", func() {
 				}.Build(),
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Describe("VirtualNetwork readiness", func() {
+		var natGatewaysServer *PrivateNATGatewaysServer
+
+		BeforeEach(func() {
+			var err error
+			natGatewaysServer, err = NewPrivateNATGatewaysServer().
+				SetLogger(logger).
+				SetAttributionLogic(attribution).
+				SetTenancyLogic(tenancy).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("rejects Create when the VirtualNetwork is not READY", func() {
+			vnID := createVirtualNetwork()
+			vnResponse, err := vnDao.Get().SetId(vnID).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			virtualNetwork := vnResponse.GetObject()
+			virtualNetwork.GetStatus().SetState(privatev1.VirtualNetworkState_VIRTUAL_NETWORK_STATE_PENDING)
+			_, err = vnDao.Update().SetObject(virtualNetwork).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+
+			eip := createAllocatedExternalIP()
+			_, err = natGatewaysServer.Create(ctx, privatev1.NATGatewaysCreateRequest_builder{
+				Object: privatev1.NATGateway_builder{
+					Metadata: privatev1.Metadata_builder{Name: "pending-vn-nat", Tenant: testTenant}.Build(),
+					Spec: privatev1.NATGatewaySpec_builder{
+						VirtualNetwork: privatev1.VirtualNetworkLocalReference_builder{Id: vnID}.Build(),
+						ExternalIp:     privatev1.ExternalIPLocalReference_builder{Id: eip.GetId()}.Build(),
+					}.Build(),
+				}.Build(),
+			}.Build())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.FailedPrecondition))
+			Expect(err.Error()).To(ContainSubstring("must be READY"))
 		})
 	})
 

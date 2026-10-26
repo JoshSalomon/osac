@@ -473,6 +473,10 @@ func setupClusterControllers(
 			)
 			reconciler.StallThresholds = clusterOrderStallThresholdsFromEnv()
 			reconciler.Recorder = localMgr.GetEventRecorder(controller.ClusterOrderControllerName)
+			if grpcConn != nil {
+				reconciler.ClustersClient = privatev1.NewClustersClient(grpcConn)
+				reconciler.ExternalIPAttachmentsClient = privatev1.NewExternalIPAttachmentsClient(grpcConn)
+			}
 			if err := reconciler.SetupWithManager(mgr); err != nil {
 				return err
 			}
@@ -669,6 +673,11 @@ func setupControllers(
 	mgr mcmanager.Manager, grpcConn grpc.ClientConnInterface,
 	flags *controllerFlags, maxJobHistory int, fulfillmentTrustSourceName string,
 ) error {
+	if flags.Cluster || flags.ComputeInstance || flags.BareMetalInstance {
+		if err := controller.RegisterAutoExternalIPAttachmentOwnerIndex(mgr.GetLocalManager().GetFieldIndexer()); err != nil {
+			return fmt.Errorf("register ExternalIPAttachment owner index: %w", err)
+		}
+	}
 	if flags.Cluster {
 		if err := setupClusterControllers(mgr, grpcConn, maxJobHistory); err != nil {
 			return fmt.Errorf("cluster controllers: %w", err)
@@ -1236,8 +1245,7 @@ func setupNATGatewayControllers(
 	return nil
 }
 
-// setupBareMetalInstanceControllers registers the BareMetalInstance feedback controller
-// when a gRPC connection to the fulfillment service is available.
+// setupBareMetalInstanceControllers registers BareMetalInstance controllers.
 func setupBareMetalInstanceControllers(
 	mgr mcmanager.Manager,
 	grpcConn grpc.ClientConnInterface,
@@ -1246,6 +1254,16 @@ func setupBareMetalInstanceControllers(
 	bareMetalInstanceNamespace := os.Getenv(envBareMetalInstanceNamespace)
 	if bareMetalInstanceNamespace == "" {
 		bareMetalInstanceNamespace = controller.DefaultBareMetalInstanceNamespace
+	}
+	reconciler := controller.NewBareMetalInstanceCleanupReconciler(
+		localMgr.GetClient(), bareMetalInstanceNamespace, os.Getenv(envNetworkingNamespace),
+	)
+	if grpcConn != nil {
+		reconciler.BareMetalInstancesClient = privatev1.NewBareMetalInstancesClient(grpcConn)
+		reconciler.ExternalIPAttachmentsClient = privatev1.NewExternalIPAttachmentsClient(grpcConn)
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("baremetalinstance cleanup controller: %w", err)
 	}
 
 	if grpcConn != nil {
@@ -1385,6 +1403,7 @@ func main() {
 	var remoteScheme *runtime.Scheme
 	var remoteProvider multicluster.Provider
 	var remoteCluster cluster.Cluster
+	var remoteKubeconfigDigest string
 	if remoteClusterKubeconfig == "" {
 		localScheme = runtime.NewScheme()
 		addSchemesForLocalControllers(localScheme,
@@ -1395,6 +1414,11 @@ func main() {
 			ctrlFlags.BareMetalInstance,
 		)
 	} else {
+		remoteKubeconfigDigest, err = readRemoteKubeconfigDigest(remoteClusterKubeconfig)
+		if err != nil {
+			setupLog.Error(err, "unable to read remote cluster kubeconfig")
+			os.Exit(1)
+		}
 		remoteScheme = runtime.NewScheme()
 		addSchemesForRemoteControllers(localScheme, remoteScheme,
 			ctrlFlags.ComputeInstance,
@@ -1536,7 +1560,10 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := startComponents(ctrl.SetupSignalHandler(), remoteCluster, remoteProvider, mgr); err != nil {
+	if err := startComponentsWithRemoteKubeconfigWatch(
+		ctrl.SetupSignalHandler(), remoteCluster, remoteProvider, mgr,
+		remoteClusterKubeconfig, remoteKubeconfigDigest,
+	); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
@@ -1567,6 +1594,26 @@ func startComponents(
 		return ignoreCanceled(mgr.Start(ctx))
 	})
 	return g.Wait()
+}
+
+func startComponentsWithRemoteKubeconfigWatch(
+	ctx context.Context,
+	remoteCluster cluster.Cluster,
+	remoteProvider multicluster.Provider,
+	mgr mcmanager.Manager,
+	remoteKubeconfigPath string,
+	initialDigest string,
+) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if remoteKubeconfigPath != "" {
+		go func() {
+			if watchRemoteKubeconfig(ctx, remoteKubeconfigPath, initialDigest, remoteKubeconfigWatchInterval) {
+				cancel()
+			}
+		}()
+	}
+	return startComponents(ctx, remoteCluster, remoteProvider, mgr)
 }
 
 // ignoreCanceled returns nil if the error is exactly context.Canceled,

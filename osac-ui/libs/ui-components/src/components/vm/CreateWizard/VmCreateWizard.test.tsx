@@ -17,10 +17,6 @@ vi.mock('react-router-dom', async (importOriginal) => {
   };
 });
 
-vi.mock('@osac/ui-components/hooks/use-session.tsx', () => ({
-  useSession: vi.fn(() => ({ role: 'tenant', username: 'test-user', tenantId: 'test-tenant' })),
-}));
-
 const INSTANCE_TYPE_ID = 'it-standard-4-8';
 const DISK_IMAGE_ID = 'disk-image-rhel-9';
 const STORAGE_TIER_ID = 'tier-fast';
@@ -61,6 +57,7 @@ const vmCatalogItem = create(ComputeInstanceCatalogItemSchema, {
 const renderWizard = (onClosed = vi.fn()) =>
   renderWithProviders(<VmCreateWizard onClosed={onClosed} />, {
     apiFixtures: { catalogItems: [vmCatalogItem] },
+    session: { role: 'tenant-user' },
   });
 
 // The catalog card's selectable radio input does not currently expose an
@@ -85,12 +82,14 @@ const selectCatalogItemAndFillName = async (
 };
 
 const advanceThroughRemainingSteps = async (user: ReturnType<typeof renderWizard>['user']) => {
-  // Configuration, Storage, and Networking: every governed field is locked
-  // with a catalog default, so Next can be clicked without further input.
-  await user.click(screen.getByRole('button', { name: 'Next' }));
-  await user.click(screen.getByRole('button', { name: 'Next' }));
-  await user.click(screen.getByRole('button', { name: 'Next' }));
-  await user.click(screen.getByRole('button', { name: 'Next' }));
+  // Configuration through Access: governed fields are locked with catalog defaults,
+  // so Next can be clicked without further input.
+  for (let step = 0; step < 5; step += 1) {
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+  }
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: 'Create' })).toBeInTheDocument();
+  });
 };
 
 describe('VmCreateWizard', () => {
@@ -107,6 +106,7 @@ describe('VmCreateWizard', () => {
     const { user } = renderWithProviders(<VmCreateWizard onClosed={vi.fn()} />, {
       apiFixtures: { catalogItems: [vmCatalogItem] },
       transportOverrides: { onComputeInstanceCreate: onComputeInstanceCreate as never },
+      session: { role: 'tenant-user' },
     });
 
     await selectCatalogItemAndFillName(user, 'my-vm');
@@ -142,6 +142,7 @@ describe('VmCreateWizard', () => {
           throw new ConnectError('Instance type is at capacity', Code.ResourceExhausted);
         },
       },
+      session: { role: 'tenant-user' },
     });
 
     await selectCatalogItemAndFillName(user, 'my-vm');

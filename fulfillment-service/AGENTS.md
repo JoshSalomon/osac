@@ -35,6 +35,7 @@ respective areas.
 
 ## Invariants
 
+- Never edit this file.
 - Do not hand-edit `../proto/public/`, `../proto/gen/`, `*_mock.go`, or `go.sum`.
 - Express field and cross-field validation with proto validation annotations when possible, not duplicated Go checks.
 - Base resource messages follow the custom `OSAC_OBJECT_SHAPE` rule. An intentional exception requires `// buf:lint:ignore OSAC_OBJECT_SHAPE` directly above the message.
@@ -73,22 +74,6 @@ ginkgo run --timeout 20m -r internal # All unit suites. Slow, run only when nece
 ### Integration tests
 
 Integration tests run in a local Kind Kubernetes cluster; the installer builds and deploys current images.
-
-See the [fulfillment-service test tiers and coverage notes](../docs/INTEGRATION-TESTING.md#fulfillment-service).
-
-Cluster tenant-placement changes require the `internal/servers` PostgreSQL suite
-and the authenticated public Cluster cases in `it/it_public_clusters_test.go` via
-`SUITE=fulfillment`. These cover reserved-tenant rejection, real-tenant creation,
-and legacy shared-object cleanup, not deployed worker provisioning or teardown;
-that boundary belongs to the existing tenant-owned CaaS E2E journey.
-
-FabricDomain API authorization, tenant filtering, CRUD persistence, and cleanup
-are component-integration coverage in
-[`it/it_fabric_domain_tenant_api_test.go`](it/it_fabric_domain_tenant_api_test.go).
-Run it through the `SUITE=fulfillment` installer target; that stage deploys the
-service and database with the operator disabled, so it does not exercise Netris
-or AAP. The complete provider lifecycle belongs to the BMaaS E2E coverage in
-OSAC-4786.
 
 ```bash
 export KUBECONFIG="$HOME/.kube/osac-dev-kind.kubeconfig"

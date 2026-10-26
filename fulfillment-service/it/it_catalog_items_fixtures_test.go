@@ -75,19 +75,43 @@ func deferCatalogItemFixtureDeletion(deleteDependency func(context.Context) erro
 		}
 		Expect(err).NotTo(HaveOccurred())
 		if deleted != nil {
-			Eventually(func() bool {
+			Eventually(func() (bool, error) {
 				removed, err := deleted(ctx)
-				if err != nil {
-					if status.Code(err) == codes.NotFound {
-						return true
-					}
-					// Transient error during async deletion — retry.
-					return false
+				if status.Code(err) == codes.NotFound {
+					return true, nil
 				}
-				return removed
-			}, 5*time.Minute, 2*time.Second).Should(BeTrue(), "fixture was not removed")
+				return removed, err
+			}, 5*time.Minute, 200*time.Millisecond).WithContext(ctx).Should(BeTrue(), "fixture was not removed")
 		}
 	})
+}
+
+// Observe archival frequently without increasing reconciliation signals. Each
+// dependency gets its own probe, so cleanup still proceeds in dependency order.
+func catalogItemDeletionProbe(get, signal func(context.Context) error) func(context.Context) (bool, error) {
+	var nextSignal time.Time
+	return func(ctx context.Context) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		err := get(ctx)
+		if status.Code(err) == codes.NotFound {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if time.Now().Before(nextSignal) {
+			return false, nil
+		}
+		err = signal(ctx)
+		// Match the old two-second pause after a completed Signal RPC.
+		nextSignal = time.Now().Add(2 * time.Second)
+		if status.Code(err) == codes.NotFound {
+			return true, nil
+		}
+		return false, err
+	}
 }
 
 func catalogItemFixtureMetadata(tenant, project string) *privatev1.Metadata {
@@ -306,20 +330,13 @@ func createCatalogItemSubnetInClassFixture(ctx context.Context, tenant, project,
 	deferCatalogItemFixtureDeletion(func(ctx context.Context) error {
 		_, err := networks.Delete(ctx, privatev1.VirtualNetworksDeleteRequest_builder{Id: networkID}.Build())
 		return err
-	}, func(ctx context.Context) (bool, error) {
+	}, catalogItemDeletionProbe(func(ctx context.Context) error {
 		_, err := networks.Get(ctx, privatev1.VirtualNetworksGetRequest_builder{Id: networkID}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		if err != nil {
-			return false, nil
-		}
-		_, err = privatev1.NewVirtualNetworksClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.VirtualNetworksSignalRequest_builder{Id: networkID}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		return false, nil
-	})
+		return err
+	}, func(ctx context.Context) error {
+		_, err := privatev1.NewVirtualNetworksClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.VirtualNetworksSignalRequest_builder{Id: networkID}.Build())
+		return err
+	}))
 
 	Eventually(func() privatev1.VirtualNetworkState {
 		r, e := networks.Get(ctx, privatev1.VirtualNetworksGetRequest_builder{Id: networkID}.Build())
@@ -364,20 +381,13 @@ func createCatalogItemSubnetInClassFixture(ctx context.Context, tenant, project,
 	deferCatalogItemFixtureDeletion(func(ctx context.Context) error {
 		_, err := subnets.Delete(ctx, privatev1.SubnetsDeleteRequest_builder{Id: subnetID}.Build())
 		return err
-	}, func(ctx context.Context) (bool, error) {
+	}, catalogItemDeletionProbe(func(ctx context.Context) error {
 		_, err := subnets.Get(ctx, privatev1.SubnetsGetRequest_builder{Id: subnetID}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		if err != nil {
-			return false, nil
-		}
-		_, err = privatev1.NewSubnetsClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.SubnetsSignalRequest_builder{Id: subnetID}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		return false, nil
-	})
+		return err
+	}, func(ctx context.Context) error {
+		_, err := privatev1.NewSubnetsClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.SubnetsSignalRequest_builder{Id: subnetID}.Build())
+		return err
+	}))
 
 	Eventually(func() privatev1.SubnetState {
 		r, e := subnets.Get(ctx, privatev1.SubnetsGetRequest_builder{Id: subnetID}.Build())
@@ -425,20 +435,13 @@ func createCatalogItemNetworkInClassFixture(ctx context.Context, tenant, project
 	deferCatalogItemFixtureDeletion(func(ctx context.Context) error {
 		_, err := groups.Delete(ctx, privatev1.SecurityGroupsDeleteRequest_builder{Id: groupID}.Build())
 		return err
-	}, func(ctx context.Context) (bool, error) {
+	}, catalogItemDeletionProbe(func(ctx context.Context) error {
 		_, err := groups.Get(ctx, privatev1.SecurityGroupsGetRequest_builder{Id: groupID}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		if err != nil {
-			return false, nil
-		}
-		_, err = privatev1.NewSecurityGroupsClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.SecurityGroupsSignalRequest_builder{Id: groupID}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		return false, nil
-	})
+		return err
+	}, func(ctx context.Context) error {
+		_, err := privatev1.NewSecurityGroupsClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.SecurityGroupsSignalRequest_builder{Id: groupID}.Build())
+		return err
+	}))
 
 	waitForNetworkingFixtureResource(ctx, func(probeCtx context.Context) error {
 		_, err := groups.Get(probeCtx, privatev1.SecurityGroupsGetRequest_builder{Id: groupID}.Build())
@@ -565,6 +568,11 @@ func catalogItemParameterPolicies() map[string]*publicv1.TemplateParameterPolicy
 // Keycloak break-glass administration does not imply OSAC tenant-admin permissions.
 // Grant that realm role before logging in so the public API exercises genuine tenant scope.
 func createCatalogItemTenantAdminFixture(ctx context.Context) (string, *grpc.ClientConn) {
+	identity := createCatalogItemTenantAdminIdentityFixture(ctx)
+	return identity.TenantID, identity.Conn
+}
+
+func createCatalogItemTenantAdminIdentityFixture(ctx context.Context) metadataTestIdentity {
 	GinkgoHelper()
 	tenants := privatev1.NewTenantsClient(tool.InternalView().AdminConn())
 	name := catalogItemFixtureName()
@@ -601,10 +609,28 @@ func createCatalogItemTenantAdminFixture(ctx context.Context) (string, *grpc.Cli
 	Expect(code).To(Equal(http.StatusNoContent))
 
 	_, token := loginAsBreakGlass(ctx, tenants, name, id)
-	conn, err := tool.makeGrpcConn(externalServiceAddr, token)
+	publicConn, err := tool.makeGrpcConn(externalServiceAddr, token)
 	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(conn.Close)
-	return name, conn
+	DeferCleanup(publicConn.Close)
+	credentials := tenant.GetObject().GetStatus().GetBreakGlassCredentials()
+	username, password := "", ""
+	if credentials != nil {
+		username = credentials.GetUsername()
+		password = credentials.GetPassword()
+	}
+	if password == "" {
+		username = fmt.Sprintf("%s-osac-break-glass", name)
+		password = "test-break-glass-pass-123!"
+	}
+	httpClient := tool.makeHttpClient(externalServiceAddr, token)
+	DeferCleanup(func() { httpClient.CloseIdleConnections() })
+	return metadataTestIdentity{
+		Conn:       publicConn,
+		HTTPClient: httpClient,
+		TenantID:   name,
+		Username:   username,
+		Password:   password,
+	}
 }
 
 func createCatalogItemComputeInstanceProvisioningTemplateFixture(ctx context.Context, parameters []*privatev1.ComputeInstanceTemplateParameterDefinition) string {
@@ -810,20 +836,13 @@ func deferComputeInstanceDeletion(id string, conn *grpc.ClientConn) {
 	deferCatalogItemFixtureDeletion(func(ctx context.Context) error {
 		_, err := client.Delete(ctx, publicv1.ComputeInstancesDeleteRequest_builder{Id: id}.Build())
 		return err
-	}, func(ctx context.Context) (bool, error) {
+	}, catalogItemDeletionProbe(func(ctx context.Context) error {
 		_, err := client.Get(ctx, publicv1.ComputeInstancesGetRequest_builder{Id: id}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		_, err = privatev1.NewComputeInstancesClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.ComputeInstancesSignalRequest_builder{Id: id}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		return false, err
-	})
+		return err
+	}, func(ctx context.Context) error {
+		_, err := privatev1.NewComputeInstancesClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.ComputeInstancesSignalRequest_builder{Id: id}.Build())
+		return err
+	}))
 }
 
 func createClusterFixture(ctx context.Context, conn *grpc.ClientConn, spec *publicv1.ClusterSpec) (*publicv1.Cluster, error) {
@@ -849,20 +868,13 @@ func deferClusterDeletion(id string, conn *grpc.ClientConn) {
 	deferCatalogItemFixtureDeletion(func(ctx context.Context) error {
 		_, err := client.Delete(ctx, publicv1.ClustersDeleteRequest_builder{Id: id}.Build())
 		return err
-	}, func(ctx context.Context) (bool, error) {
+	}, catalogItemDeletionProbe(func(ctx context.Context) error {
 		_, err := client.Get(ctx, publicv1.ClustersGetRequest_builder{Id: id}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		_, err = privatev1.NewClustersClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.ClustersSignalRequest_builder{Id: id}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		return false, err
-	})
+		return err
+	}, func(ctx context.Context) error {
+		_, err := privatev1.NewClustersClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.ClustersSignalRequest_builder{Id: id}.Build())
+		return err
+	}))
 }
 
 func createBareMetalInstanceFixture(ctx context.Context, conn *grpc.ClientConn, spec *publicv1.BareMetalInstanceSpec) (*publicv1.BareMetalInstance, error) {
@@ -881,20 +893,13 @@ func createBareMetalInstanceFixture(ctx context.Context, conn *grpc.ClientConn, 
 	deferCatalogItemFixtureDeletion(func(ctx context.Context) error {
 		_, err := client.Delete(ctx, publicv1.BareMetalInstancesDeleteRequest_builder{Id: result.GetId()}.Build())
 		return err
-	}, func(ctx context.Context) (bool, error) {
+	}, catalogItemDeletionProbe(func(ctx context.Context) error {
 		_, err := client.Get(ctx, publicv1.BareMetalInstancesGetRequest_builder{Id: result.GetId()}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		_, err = privatev1.NewBareMetalInstancesClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.BareMetalInstancesSignalRequest_builder{Id: result.GetId()}.Build())
-		if status.Code(err) == codes.NotFound {
-			return true, nil
-		}
-		return false, err
-	})
+		return err
+	}, func(ctx context.Context) error {
+		_, err := privatev1.NewBareMetalInstancesClient(tool.InternalView().AdminConn()).Signal(ctx, privatev1.BareMetalInstancesSignalRequest_builder{Id: result.GetId()}.Build())
+		return err
+	}))
 	return result, nil
 }
 
@@ -926,6 +931,10 @@ func setCatalogItemSubnetFixtureState(ctx context.Context, id string, state priv
 
 // createCatalogItemMemberFixture authenticates an ordinary member of the item's tenant.
 func createCatalogItemMemberFixture(ctx context.Context, tenant string) *grpc.ClientConn {
+	return createCatalogItemMemberIdentityFixture(ctx, tenant).Conn
+}
+
+func createCatalogItemMemberIdentityFixture(ctx context.Context, tenant string) metadataTestIdentity {
 	GinkgoHelper()
 	name := catalogItemFixtureName()
 	code, _, err := tool.KeycloakAdminRequest(ctx, http.MethodPost, "/users", map[string]any{"username": name, "enabled": true, "firstName": name, "lastName": "Test"})
@@ -941,7 +950,15 @@ func createCatalogItemMemberFixture(ctx context.Context, tenant string) *grpc.Cl
 	conn, err := tool.makeGrpcConn(externalServiceAddr, token)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(conn.Close)
-	return conn
+	httpClient := tool.makeHttpClient(externalServiceAddr, token)
+	DeferCleanup(func() { httpClient.CloseIdleConnections() })
+	return metadataTestIdentity{
+		Conn:       conn,
+		HTTPClient: httpClient,
+		TenantID:   tenant,
+		Username:   name,
+		Password:   usersPassword,
+	}
 }
 
 const tenantDefaultNetworkingLabel = "osac.openshift.io/default"

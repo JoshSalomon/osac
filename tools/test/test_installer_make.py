@@ -27,6 +27,9 @@ BASE_ARGS = ["PLATFORM=kind", "PROFILE=dev", "NS=osac"]
 IGNORED_ENV = {
     "AAP_LICENSE_FILE",
     "CONTAINER_TOOL",
+    "DRY_RUN",
+    "DRY_RUN_CLUSTER_DOMAIN",
+    "DRY_RUN_OCP_VERSION",
     "EXTRA_HELM_ARGS",
     "GODEBUG",
     "KIND_CLUSTER_NAME",
@@ -378,6 +381,16 @@ class InstallerMakeTest(unittest.TestCase):
                 result = self.make("install", *BASE_ARGS, f"DRY_RUN={value}")
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("DRY_RUN must be 0 or 1", result.stderr)
+
+    def test_ignores_inherited_dry_run_settings(self):
+        """An exported DRY_RUN must not change what the tests exercise."""
+        with mock.patch.dict(os.environ, {
+            "DRY_RUN": "2",
+            "DRY_RUN_CLUSTER_DOMAIN": "inherited.example",
+            "DRY_RUN_OCP_VERSION": "9.99",
+        }):
+            result = self.make("install", *BASE_ARGS)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

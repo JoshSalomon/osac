@@ -163,7 +163,7 @@ make install-osac  PLATFORM=openshift PROFILE=<profile> NS=<namespace>   # OSAC 
 | `DRY_RUN_CLUSTER_DOMAIN` | Cluster ingress domain required for an OpenShift dry run |
 | `DRY_RUN_OCP_VERSION` | OpenShift major.minor version required for an OpenShift dry run, e.g. `4.20` |
 | `USE_LOCAL_OPERATOR=true` | Kind only. Build the operator from this checkout, load it into the Kind node, and install that image instead of the registry image the values files pin. |
-| `OPERATOR_IMAGE_TAG` | Tag for the local operator image when `USE_LOCAL_OPERATOR=true` (default `it`). |
+| `OPERATOR_IMAGE_TAG` | Tag for the local operator image when the local path is active (default a unique `local-<UTC timestamp>`, generated per invocation). |
 
 `USE_LOCAL_OPERATOR=true` is for testing an operator change without publishing
 an image. Each `install-osac` (and each `make install` that includes it) first

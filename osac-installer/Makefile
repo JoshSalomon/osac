@@ -282,9 +282,10 @@ OSAC_HELM_FORCE_CONFLICTS :=
 endif
 
 # NS reaches shell text through KIND_RUNTIME_ENV and helm arguments, so accept
-# only a valid Kubernetes namespace name. Targets that do not take NS leave it
-# unset; the install targets require it in the block above.
-ifneq ($(strip $(NS)),)
+# only a valid Kubernetes namespace name. Validate whenever NS is non-empty:
+# gating on $(strip ...) let a whitespace-only value skip the check. Targets
+# that do not take NS leave it unset; the install targets require it above.
+ifdef NS
 export NS
 NS_VALID := $(shell [ -n "$$NS" ] && printf '%s' "$$NS" | grep -Eqx '[a-z0-9]([a-z0-9-]*[a-z0-9])?' && [ "$$(printf '%s' "$$NS" | wc -l)" -eq 0 ] && [ $${#NS} -le 63 ] && echo yes || echo no)
 ifneq ($(NS_VALID),yes)

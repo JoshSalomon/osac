@@ -329,5 +329,11 @@ class InstallerMakeTest(unittest.TestCase):
         self.assertIn("operator.image.pullPolicy=Never", result.stdout)
 
 
+    def test_rejects_a_whitespace_only_namespace(self):
+        """Spaces from the environment are defined but not a namespace."""
+        result = self.make("install-osac", "PLATFORM=kind", "PROFILE=dev", NS="   ")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("NS must be a valid Kubernetes namespace name", result.stderr)
+
 if __name__ == "__main__":
     unittest.main()

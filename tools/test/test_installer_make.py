@@ -342,5 +342,16 @@ class InstallerMakeTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("NS must be a valid Kubernetes namespace name", result.stderr)
 
+    def test_no_fulfillment_phase_rebuilds_the_operator(self):
+        """A caller's USE_LOCAL_OPERATOR must not reach the nested installs."""
+        result = self.make("test", *BASE_ARGS, "SUITE=fulfillment",
+                           "USE_LOCAL_OPERATOR=true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        nested = [line for line in result.stdout.splitlines()
+                  if "install-osac " in line]
+        self.assertTrue(nested, result.stdout)
+        for line in nested:
+            self.assertIn("USE_LOCAL_OPERATOR=false", line, line)
+
 if __name__ == "__main__":
     unittest.main()

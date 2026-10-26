@@ -6,6 +6,8 @@ Run: python3 tools/test/test_repo_tools.py
 import re
 import subprocess
 import unittest
+
+import yaml
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +53,17 @@ class RepoToolsTest(unittest.TestCase):
     def test_envtest_wrapper_writes_no_files_to_the_checkout(self):
         text = (ROOT / "osac-operator/hack/go-test-openshell.sh").read_text()
         self.assertNotIn('--tmpdir="$PWD"', text)
+
+    def test_policy_rules_allow_the_project_python_interpreter(self):
+        """The image's venv runs /usr/bin/python3.13, not /usr/bin/python3."""
+        policies = yaml.safe_load(
+            (ROOT / "tools/carbonite/policy.yaml").read_text())["network_policies"]
+        missing = [
+            name for name, rule in policies.items()
+            if "/usr/bin/python3" in [b["path"] for b in rule.get("binaries", [])]
+            and "/usr/bin/python3.13" not in [b["path"] for b in rule.get("binaries", [])]
+        ]
+        self.assertEqual([], missing)
 
 if __name__ == "__main__":
     unittest.main()

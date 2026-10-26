@@ -10,8 +10,10 @@ in compliance with the License. You may obtain a copy of the License at
 package database
 
 import (
+	"context"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -102,6 +104,25 @@ func TestStartLocalUsesUnixSocketOnly(t *testing.T) {
 		if strings.Contains(args, unwanted) {
 			t.Errorf("postgres arguments still configure TCP (%q):\n%s", unwanted, args)
 		}
+	}
+}
+
+func TestStopLocalReportsAnUnexpectedExit(t *testing.T) {
+	container := &Container{
+		logger:  logr.Discard(),
+		tool:    "/bin/sh",
+		local:   true,
+		dataDir: t.TempDir(),
+		runCmd:  exec.Command("/bin/sh", "-c", "trap 'exit 3' INT; while :; do sleep 0.05; done"),
+	}
+	if err := container.runCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond) // let the trap install before signalling
+
+	err := container.stopLocal(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "exited") {
+		t.Fatalf("stopLocal() = %v, want an unexpected-exit error", err)
 	}
 }
 

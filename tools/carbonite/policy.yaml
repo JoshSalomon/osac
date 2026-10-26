@@ -61,6 +61,7 @@ network_policies:
     binaries:
       - path: /usr/bin/curl
       - path: /usr/bin/python3
+      - path: /usr/bin/python3.13
       - path: /sandbox/.local/bin/claude
       - path: /sandbox/.local/bin/opencode
       - path: /sandbox/.local/bin/claude-bin
@@ -182,6 +183,7 @@ network_policies:
       - path: /usr/bin/node
       - path: /usr/local/bin/node
       - path: /usr/bin/python3
+      - path: /usr/bin/python3.13
       - path: /usr/local/bin/claude
       - path: /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
 
@@ -305,6 +307,7 @@ network_policies:
     binaries:
       - path: /usr/bin/curl
       - path: /usr/bin/python3
+      - path: /usr/bin/python3.13
       - path: /usr/local/bin/ai-guardian
 
   github_raw:
@@ -316,6 +319,7 @@ network_policies:
     binaries:
       - path: /usr/bin/curl
       - path: /usr/bin/python3
+      - path: /usr/bin/python3.13
       - path: /usr/local/bin/ai-guardian
       - path: /usr/local/bin/betterleaks
       - path: /usr/local/bin/gitleaks
@@ -366,6 +370,7 @@ network_policies:
         enforcement: enforce
     binaries:
       - path: /usr/bin/python3
+      - path: /usr/bin/python3.13
       - path: /usr/bin/curl
 
   pypi:
@@ -379,6 +384,7 @@ network_policies:
         enforcement: enforce
     binaries:
       - path: /usr/bin/python3
+      - path: /usr/bin/python3.13
       - path: /usr/local/bin/uv
       - path: /usr/local/bin/pip
       - path: /usr/local/bin/pip3

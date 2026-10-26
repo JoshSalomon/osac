@@ -241,7 +241,10 @@ func (c *Container) stopLocal(ctx context.Context) error {
 		done := make(chan error, 1)
 		go func() { done <- c.runCmd.Wait() }()
 		select {
-		case <-done:
+		case waitErr := <-done:
+			if waitErr != nil {
+				stopErr = errors.Join(stopErr, fmt.Errorf("local PostgreSQL exited unexpectedly: %w", waitErr))
+			}
 		case <-ctx.Done():
 			_ = c.runCmd.Process.Kill()
 			<-done

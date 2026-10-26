@@ -65,6 +65,8 @@ class DispatcherTests(unittest.TestCase):
 
     def test_sandbox_helper_honors_project_dir(self):
         """The checkout root comes from PROJECT_DIR, not a hardcoded path."""
+        if pathlib.Path("/sandbox/.ssh/osac-host-build").exists():
+            self.skipTest("host builds are enabled here; the helper would reach the host")
         with tempfile.TemporaryDirectory() as temp:
             base = pathlib.Path(temp)
             (base / "osac-ui").mkdir()

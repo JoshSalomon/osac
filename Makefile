@@ -326,9 +326,6 @@ check-carb: ## Check host commands, engine, gateway and host-build binding
 		exit 1; \
 	fi; \
 	printf 'Carbonite prerequisites OK: gateway "%s" is connected and authenticated.\n' "$(CARBONITE_GATEWAY)"; \
-	if [ "$(CARBONITE_WORKDIR)" != /sandbox/osac ]; then \
-		printf 'Note: CARBONITE_WORKDIR differs from /sandbox/osac; the policy paths for setup-envtest and the AAP venv assume the default workdir. Adjust the policy for a custom workdir.\n' >&2; \
-	fi; \
 	if [ "$(CARBONITE_VERTEX)" != 1 ]; then \
 		if [ -t 2 ] && [ -z "$${NO_COLOR:-}" ] && [ "$${TERM:-}" != dumb ]; then \
 			printf '\033[1;33mWARNING:\033[0m Claude Code in the sandbox is only supported through Vertex AI.\n' >&2; \

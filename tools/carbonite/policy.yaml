@@ -357,7 +357,8 @@ network_policies:
         port: 443
         enforcement: enforce
     binaries:
-      - path: /sandbox/osac/*/bin/setup-envtest*
+      # Relative to the project workdir, which CARBONITE_WORKDIR may change.
+      - path: /sandbox/*/*/bin/setup-envtest*
 
   google_storage:
     name: google-cloud-storage
@@ -403,7 +404,7 @@ network_policies:
     binaries:
       # uv's project venv links its Python executable to /usr/bin/python3.13.
       - path: /usr/bin/python3.13
-      - path: /sandbox/osac/osac-aap/.venv/bin/python
+      - path: /sandbox/*/osac-aap/.venv/bin/python
       - path: /opt/osac-python/bin/python
 
   npm_registry:

@@ -65,5 +65,10 @@ class RepoToolsTest(unittest.TestCase):
         ]
         self.assertEqual([], missing)
 
+    def test_policy_paths_are_independent_of_the_default_workdir(self):
+        """CARBONITE_WORKDIR is documented as overridable; no path may assume it."""
+        text = (ROOT / "tools/carbonite/policy.yaml").read_text()
+        self.assertNotIn("/sandbox/osac", text)
+
 if __name__ == "__main__":
     unittest.main()

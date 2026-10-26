@@ -812,11 +812,11 @@ if os.environ.get("OSAC_CARB_FAIL_MANAGER"):
                    if call[0] == "engine" and call[1:3] == ["volume", "create"]]
         self.assertTrue(any("my-kubeconfig" in call for call in creates), creates)
 
-    def test_check_notes_the_policy_coupling_of_a_custom_workdir(self):
+    def test_check_accepts_a_custom_workdir(self):
+        """The policy paths are workdir-relative, so no override warning is needed."""
         result = self.make("check-carb", CARBONITE_WORKDIR="/sandbox/project")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("CARBONITE_WORKDIR", result.stderr)
-        self.assertIn("/sandbox/osac", result.stderr)
+        self.assertNotIn("CARBONITE_WORKDIR", result.stderr)
 
     def test_check_does_not_warn_for_the_default_workdir(self):
         result = self.make("check-carb")

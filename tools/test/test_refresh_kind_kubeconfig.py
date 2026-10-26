@@ -159,5 +159,16 @@ class RefreshKindKubeconfigTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot reach the cluster", result.stderr)
 
+    def test_failure_never_reprints_stdout_even_when_it_holds_the_token(self):
+        """A failing kubectl that also wrote a token to stdout must not leak it."""
+        self.command("kubectl", '#!/bin/sh\n'
+                     'printf "%s\\n" "$TEST_TOKEN"\n'
+                     'echo "Error from server (Forbidden): users \\"sandbox-test\\" is forbidden" >&2\n'
+                     'exit 1\n')
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden", result.stderr)
+        self.assertNotIn(self.new_token, result.stdout + result.stderr)
+
 if __name__ == "__main__":
     unittest.main()

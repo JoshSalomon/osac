@@ -163,7 +163,7 @@ make install-osac  PLATFORM=openshift PROFILE=<profile> NS=<namespace>   # OSAC 
 | `DRY_RUN_CLUSTER_DOMAIN` | Cluster ingress domain required for an OpenShift dry run |
 | `DRY_RUN_OCP_VERSION` | OpenShift major.minor version required for an OpenShift dry run, e.g. `4.20` |
 | `USE_LOCAL_OPERATOR=true` | Kind only. Build the operator from this checkout, load it into the Kind node, and install that image instead of the registry image the values files pin. |
-| `OPERATOR_IMAGE_TAG` | Tag for the local operator image when the local path is active (default a unique `local-<UTC timestamp>`, generated per invocation). |
+| `OPERATOR_IMAGE_TAG` | Tag for the local operator image when the local path is active (default a fresh `local-<UTC timestamp>` tag per invocation). |
 
 `USE_LOCAL_OPERATOR=true` is for testing an operator change without publishing
 an image. Each `install-osac` (and each `make install` that includes it) first
@@ -175,7 +175,7 @@ make install-osac PLATFORM=kind PROFILE=dev NS=osac USE_LOCAL_OPERATOR=true
 ```
 
 The flag's `--set` values are applied after `EXTRA_HELM_ARGS`, so it wins over
-an `EXTRA_HELM_ARGS` image override. By default each build gets a tag unique to
+an `EXTRA_HELM_ARGS` image override. By default each build gets a fresh tag for
 that invocation, so a rebuilt image always changes the Deployment and rolls the
 operator pod instead of leaving the previous one running. If you set
 `OPERATOR_IMAGE_TAG` yourself, use a new tag for each rebuild: reusing a tag

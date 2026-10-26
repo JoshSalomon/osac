@@ -45,10 +45,14 @@ endif
 # a localhost image. The flag's --set values win over EXTRA_HELM_ARGS; use
 # OPERATOR_IMAGE_TAG to select another locally loaded tag.
 USE_LOCAL_OPERATOR ?= false
-# With USE_LOCAL_OPERATOR a rebuilt image must change the Deployment so the
-# operator pod rolls, so default to a tag unique to this invocation. It is
-# computed once, so build, load and Helm all use the same value.
-ifeq ($(USE_LOCAL_OPERATOR),true)
+# Whenever this run builds the operator locally -- with USE_LOCAL_OPERATOR, or
+# through the operator/fulfillment suites, which build and load it themselves --
+# a rebuilt image must change the Deployment so the operator pod rolls. A fixed
+# tag with pullPolicy=Never leaves the previous pod running, so default to a tag
+# unique to this invocation. It is computed once, so build, load and Helm all
+# use the same value.
+OPERATOR_IMAGE_IS_LOCAL := $(if $(filter fulfillment operator all,$(SUITE)),true,$(if $(filter true,$(USE_LOCAL_OPERATOR)),true,))
+ifeq ($(OPERATOR_IMAGE_IS_LOCAL),true)
 LOCAL_BUILD_STAMP := $(shell date -u +%Y%m%d%H%M%S)
 OPERATOR_IMAGE_TAG ?= local-$(LOCAL_BUILD_STAMP)
 else

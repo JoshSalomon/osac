@@ -280,12 +280,19 @@ class InstallerMakeTest(unittest.TestCase):
 
         self.assertNotEqual(self.helm_tag(first.stdout), self.helm_tag(second.stdout))
 
-    def test_suites_keep_a_stable_tag(self):
-        """The integration suites keep the stable "it" tag."""
-        result = self.make("test", *BASE_ARGS, "SUITE=operator")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.helm_tag(result.stdout), "it")
-        self.assertIn("localhost/osac-operator:it", result.stdout)
+    def test_suites_get_a_fresh_tag_per_run(self):
+        """A rebuilt image must change the Deployment so the operator pod rolls."""
+        first = self.make("test", *BASE_ARGS, "SUITE=operator")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        time.sleep(1.1)
+        second = self.make("test", *BASE_ARGS, "SUITE=operator")
+        self.assertEqual(second.returncode, 0, second.stderr)
+
+        for run in (first, second):
+            image = self.built_image(run.stdout)
+            self.assertEqual(self.helm_tag(run.stdout), image.split(":", 1)[1])
+            self.assertNotEqual("it", self.helm_tag(run.stdout))
+        self.assertNotEqual(self.helm_tag(first.stdout), self.helm_tag(second.stdout))
 
     def test_dev_full_builds_through_the_kind_runtime(self):
         """dev-full builds through the kind runtime, not the rootless tool."""

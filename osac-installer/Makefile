@@ -136,6 +136,10 @@ endif
 # though DRY_RUN defaults to 0 for a direct invocation.
 DRY_RUN_TARGET := $(filter install-dry-run,$(MAKECMDGOALS))
 ifneq ($(filter install,$(MAKECMDGOALS))$(DRY_RUN_TARGET),)
+# filter-out splits words, so require exactly one word as well.
+ifneq ($(words $(DRY_RUN)),1)
+$(error DRY_RUN must be 0 or 1)
+endif
 ifneq ($(filter-out 0 1,$(DRY_RUN)),)
 $(error DRY_RUN must be 0 or 1)
 endif

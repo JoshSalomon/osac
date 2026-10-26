@@ -371,5 +371,13 @@ class InstallerMakeTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("DRY_RUN must be 0 or 1", result.stderr)
 
+    def test_rejects_a_multi_word_dry_run_value(self):
+        """filter-out splits words; "1 0" must not pass as a dry run."""
+        for value in ("1 0", "0 0"):
+            with self.subTest(value=value):
+                result = self.make("install", *BASE_ARGS, f"DRY_RUN={value}")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("DRY_RUN must be 0 or 1", result.stderr)
+
 if __name__ == "__main__":
     unittest.main()

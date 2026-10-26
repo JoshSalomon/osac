@@ -58,6 +58,8 @@ class RefreshKindKubeconfigTest(unittest.TestCase):
             "TEST_CHCON": str(self.root / "chcon-called"),
         })
         self.env.pop("OPENSHELL_SANDBOX", None)
+        # The Makefile exports this; default-path tests must not inherit it.
+        self.env.pop("CARBONITE_KUBECONFIG_DIR", None)
         self.command("kubectl", '#!/bin/sh\nprintf "%s\\n" "$*" > "$TEST_ARGS"\nprintf "%s\\n" "$TEST_TOKEN"\n')
         self.command("getenforce", "#!/bin/sh\nprintf 'Disabled\\n'\n")
 

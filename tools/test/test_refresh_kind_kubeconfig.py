@@ -130,6 +130,7 @@ class RefreshKindKubeconfigTest(unittest.TestCase):
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden", result.stderr)
+        self.assertNotIn("sandbox-test", result.stderr)
         self.assertNotIn(self.new_token, result.stdout + result.stderr)
 
 if __name__ == "__main__":

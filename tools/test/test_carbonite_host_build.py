@@ -439,6 +439,37 @@ class ManagerTests(unittest.TestCase):
                                 "--checkout", str(self.checkout)]), message)
         self.assertIn("carbonite-host-build.md", message)
 
+    def test_probe_failure_hides_host_details(self):
+        """A classified failure keeps the cause and drops identifiers."""
+        leak = "jsalomon@internal-host.corp.example: Permission denied (publickey)."
+        with mock.patch.object(self.manager, "_run",
+                               side_effect=subprocess.CalledProcessError(255, "probe", stderr=leak)):
+            with self.assertRaises(ValueError) as raised:
+                self.manager._probe("openshell", "osac-kind", "osac-carbonite-kind", ["probe"])
+        message = str(raised.exception)
+        self.assertIn("Permission denied", message)
+        for leaked in ("jsalomon", "internal-host", "corp.example"):
+            self.assertNotIn(leaked, message)
+
+    def test_probe_retry_messages_hide_host_details(self):
+        """Retry logging carries the category, never the raw ssh diagnostics."""
+        leak = "jsalomon@internal-host.corp.example: Permission denied (publickey)."
+
+        def always_fail(argv, *, capture=False):
+            raise subprocess.CalledProcessError(255, "probe", stderr=leak)
+
+        stderr = io.StringIO()
+        with mock.patch.object(self.manager, "_run", side_effect=always_fail), \
+             mock.patch.object(self.manager.time, "sleep"), \
+             contextlib.redirect_stderr(stderr):
+            with self.assertRaises(ValueError):
+                self.manager._probe_with_retries(
+                    "openshell", "osac-kind", "osac-carbonite-kind", ["probe"])
+        text = stderr.getvalue()
+        self.assertIn("Permission denied", text)
+        for leaked in ("jsalomon", "internal-host", "corp.example"):
+            self.assertNotIn(leaked, text)
+
     def test_bound_rejects_authorization_without_the_forced_command(self):
         """A hand-repaired line without the forced command must not pass."""
         paths = self.manager._paths(self.home)

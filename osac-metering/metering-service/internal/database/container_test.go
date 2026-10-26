@@ -57,12 +57,13 @@ func TestStartLocalUsesUnixSocketOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	testAdminPassword := "fixture-password"
 	container := &Container{
 		logger:        logr.Discard(),
 		tool:          postgres,
 		initdbTool:    initdb,
 		local:         true,
-		adminPassword: "admin",
+		adminPassword: testAdminPassword,
 	}
 	if err := container.startLocal(t.Context()); err != nil {
 		t.Fatal(err)

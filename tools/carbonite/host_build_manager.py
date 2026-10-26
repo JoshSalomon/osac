@@ -431,12 +431,31 @@ def _sandbox_exec_args(gateway, workspace, sandbox, *command):
     )
 
 
+PROBE_FAILURES = (
+    (re.compile(r"permission denied", re.I), "Permission denied (publickey)"),
+    (re.compile(r"timed out|timeout|banner exchange", re.I),
+     "Connection timed out during banner exchange"),
+    (re.compile(r"host key verification failed", re.I), "Host key verification failed"),
+    (re.compile(r"connection refused", re.I), "Connection refused"),
+    (re.compile(r"no route to host|network is unreachable", re.I), "Host unreachable"),
+)
+
+
+def _classify_probe_failure(text):
+    """Map ssh diagnostics to an allowlisted cause, dropping hosts and accounts."""
+    for pattern, label in PROBE_FAILURES:
+        if pattern.search(text or ""):
+            return label
+    return "probe failed without ssh diagnostics"
+
+
 def _probe(gateway, workspace, sandbox, ssh):
-    """Run one readiness probe; raise ValueError carrying the ssh failure detail."""
+    """Run one readiness probe; raise ValueError with a classified cause."""
     try:
         result = _run(_sandbox_exec_args(gateway, workspace, sandbox, *ssh), capture=True)
     except subprocess.CalledProcessError as error:
-        raise ValueError((error.stderr or error.stdout or "").strip()) from error
+        raise ValueError("host-build probe failed: " + _classify_probe_failure(
+            (error.stderr or "") + (error.stdout or ""))) from error
     if result.stdout.strip() != READY:
         raise ValueError("host-build probe returned an unexpected response")
 

@@ -12,6 +12,25 @@ import tempfile
 import time
 
 
+KUBECTL_FAILURES = (
+    ("forbidden", "forbidden (authorization denied)"),
+    ("unauthorized", "unauthorized (credentials rejected)"),
+    ("not found", "not found (ServiceAccount or namespace missing)"),
+    ("connection refused", "cannot reach the cluster"),
+    ("no route to host", "cannot reach the cluster"),
+    ("timeout", "timed out contacting the cluster"),
+)
+
+
+def kubectl_failure(stderr: str) -> str:
+    """Map kubectl diagnostics to an allowlisted cause, dropping identifiers."""
+    text = (stderr or "").lower()
+    for needle, label in KUBECTL_FAILURES:
+        if needle in text:
+            return label
+    return "failed without a recognised diagnostic"
+
+
 def token_expiry(token: str) -> int:
     parts = token.split(".")
     if len(parts) != 3:
@@ -107,14 +126,15 @@ if __name__ == "__main__":
     try:
         hours = refresh()
     except subprocess.CalledProcessError as error:
-        detail = (error.stderr or "").strip()
-        print("Could not renew the scoped kubeconfig: " + str(error), file=sys.stderr)
-        if detail:
-            print("kubectl: " + detail, file=sys.stderr)
-        else:
-            print("Check host KiND access and setup.", file=sys.stderr)
+        print("Could not renew the scoped kubeconfig: kubectl "
+              + kubectl_failure(error.stderr), file=sys.stderr)
+        print("Check host KiND access and setup.", file=sys.stderr)
         sys.exit(1)
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except OSError as error:
+        print("Could not renew the scoped kubeconfig: " + type(error).__name__ + ": "
+              + (error.strerror or "filesystem error"), file=sys.stderr)
+        sys.exit(1)
+    except (ValueError, KeyError, TypeError) as error:
         print("Could not renew the scoped kubeconfig: " + str(error), file=sys.stderr)
         print("Check host KiND access and setup.", file=sys.stderr)
         sys.exit(1)

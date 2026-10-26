@@ -19,8 +19,8 @@ Metering pipeline for OSAC — collects resource usage events and publishes them
 ## Build and Test
 
 Inside Carbonite/OpenShell, the metering-service test suite starts an isolated
-PostgreSQL server on the sandbox loopback interface and removes its data and
-process after the suite. It does not need nested Podman or a host database.
+PostgreSQL server that listens only on a Unix socket in its temporary data
+directory and removes its data and process after the suite. It does not need nested Podman or a host database.
 Rebuild the Carbonite image and recreate an existing sandbox to pick up the
 PostgreSQL server package before running
 `make -C osac-metering/metering-service test`. Host and Distrobox tests continue

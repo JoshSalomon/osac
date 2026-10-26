@@ -11,7 +11,8 @@ them in the sandbox specification.
 
 A token reaches a request only when both checks pass: the sandbox network
 policy allows the binary and destination, and the profile's endpoints cover
-the host, port and path. This repository ships profiles for `gh` and `jira` in
+the host, port and path. This repository ships profiles for `gh`, `jira` and
+OpenAI (Codex) in
 `tools/carbonite/providers/`.
 
 ## One-time setup (per gateway workspace)

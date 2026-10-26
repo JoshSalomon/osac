@@ -366,6 +366,7 @@ and `make enter-carb` reports that the mount is unreadable, repair the label
 on the host and retry the same `make enter-carb` command:
 
 ```bash
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/osac-carbonite-kind"
 chcon --reference="$STATE_DIR/kube" "$STATE_DIR/kube/config"
 ```
 

@@ -51,13 +51,18 @@ def refresh() -> float:
         raise ValueError("Run this command on the host, outside OpenShell")
 
     home = Path.home()
-    state_home = Path(os.environ.get("XDG_STATE_HOME", home / ".local/state"))
-    state_dir = state_home / "osac-carbonite-kind"
-    kube_dir = state_dir / "kube"
+    override = os.environ.get("CARBONITE_KUBECONFIG_DIR")
+    if override:
+        # Make may mount another directory; renew the file the sandbox reads.
+        kube_dir = Path(override).expanduser()
+    else:
+        # An exported but empty XDG_STATE_HOME means unset, not the cwd.
+        state_home = Path(os.environ.get("XDG_STATE_HOME") or home / ".local/state")
+        kube_dir = state_home / "osac-carbonite-kind" / "kube"
     config_path = kube_dir / "config"
     admin_config = home / ".kube/osac-dev-kind.kubeconfig"
 
-    if any(path.is_symlink() for path in (state_dir, kube_dir, config_path)):
+    if any(path.is_symlink() for path in (kube_dir, config_path)):
         raise ValueError("Refusing a symlinked kubeconfig path")
     if not admin_config.is_file() or not config_path.is_file():
         raise ValueError("Create the initial scoped kubeconfig using the KiND guide first")
@@ -99,7 +104,7 @@ def refresh() -> float:
     expiry = token_expiry(token)
     config["users"][0]["user"] = {"token": token}
 
-    fd, next_path = tempfile.mkstemp(prefix="config.", dir=state_dir)
+    fd, next_path = tempfile.mkstemp(prefix="config.", dir=kube_dir)
     try:
         with os.fdopen(fd, "w") as next_file:
             json.dump(config, next_file)

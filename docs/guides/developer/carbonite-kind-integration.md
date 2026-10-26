@@ -392,7 +392,8 @@ Run this one command on the host before the token expires, or whenever
 
 It requests a 12-hour token, reports the lifetime Kubernetes actually
 granted, and replaces the scoped kubeconfig atomically with the correct
-SELinux label. The running sandbox sees the new file through its existing
+SELinux label. When the Makefile used `CARBONITE_KUBECONFIG_DIR`, export the
+same value in the shell that runs the renewal so it updates the mounted file. The running sandbox sees the new file through its existing
 read-only mount; no restart or rebuild is needed. The installed script is
 outside the mount, so the sandbox cannot edit the host command. If the
 script's source changes later, review it again before reinstalling.

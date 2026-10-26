@@ -70,10 +70,18 @@ class RefreshKindKubeconfigTest(unittest.TestCase):
         self.config_path.write_text(json.dumps(config))
         self.config_path.chmod(0o600)
 
-    def run_script(self):
+    def run_script(self, **env):
         return subprocess.run(
-            [sys.executable, str(SCRIPT)], env=self.env, capture_output=True, text=True
+            [sys.executable, str(SCRIPT)], env={**self.env, **env},
+            capture_output=True, text=True,
         )
+
+    def place_config(self, kube_dir):
+        kube_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path = kube_dir / "config"
+        path.write_text(json.dumps(self.original))
+        path.chmod(0o600)
+        return path
 
     def test_renews_twelve_hour_token_without_exposing_it(self):
         result = self.run_script()
@@ -169,6 +177,25 @@ class RefreshKindKubeconfigTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden", result.stderr)
         self.assertNotIn(self.new_token, result.stdout + result.stderr)
+
+    def test_renews_the_directory_named_by_the_makefile_override(self):
+        """Make may mount another directory; renew the file the sandbox reads."""
+        custom = self.root / "custom/kube"
+        path = self.place_config(custom)
+        result = self.run_script(CARBONITE_KUBECONFIG_DIR=str(custom))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(path.read_text())["users"][0]["user"]["token"],
+                         self.new_token)
+        self.assertEqual(json.loads(self.config_path.read_text()), self.original)
+        self.assertEqual(list(custom.glob("config.*")), [])
+
+    def test_empty_xdg_state_home_falls_back_to_home(self):
+        fallback = self.root / ".local/state/osac-carbonite-kind/kube"
+        path = self.place_config(fallback)
+        result = self.run_script(XDG_STATE_HOME="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(path.read_text())["users"][0]["user"]["token"],
+                         self.new_token)
 
 if __name__ == "__main__":
     unittest.main()

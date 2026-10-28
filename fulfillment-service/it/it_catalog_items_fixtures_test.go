@@ -565,6 +565,28 @@ func catalogItemParameterPolicies() map[string]*publicv1.TemplateParameterPolicy
 	}
 }
 
+func grantTenantAdminRealmRole(ctx context.Context, userID string) {
+	GinkgoHelper()
+
+	roleStatus, body, err := tool.KeycloakAdminRequest(ctx, http.MethodGet, "/roles/tenant-admin", nil)
+	Expect(err).NotTo(HaveOccurred())
+	if roleStatus == http.StatusNotFound {
+		code, _, createErr := tool.KeycloakAdminRequest(ctx, http.MethodPost, "/roles", map[string]any{"name": "tenant-admin"})
+		Expect(createErr).NotTo(HaveOccurred())
+		Expect(code).To(Or(Equal(http.StatusCreated), Equal(http.StatusConflict)))
+		roleStatus, body, err = tool.KeycloakAdminRequest(ctx, http.MethodGet, "/roles/tenant-admin", nil)
+		Expect(err).NotTo(HaveOccurred())
+	}
+	Expect(roleStatus).To(Equal(http.StatusOK))
+
+	var role map[string]any
+	Expect(json.Unmarshal(body, &role)).To(Succeed())
+	code, _, err := tool.KeycloakAdminRequest(ctx, http.MethodPost,
+		"/users/"+userID+"/role-mappings/realm", []map[string]any{role})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(code).To(Equal(http.StatusNoContent))
+}
+
 // Keycloak break-glass administration does not imply OSAC tenant-admin permissions.
 // Grant that realm role before logging in so the public API exercises genuine tenant scope.
 func createCatalogItemTenantAdminFixture(ctx context.Context) (string, *grpc.ClientConn) {
@@ -592,21 +614,7 @@ func createCatalogItemTenantAdminIdentityFixture(ctx context.Context) metadataTe
 	tenant, err := tenants.Get(ctx, privatev1.TenantsGetRequest_builder{Id: id}.Build())
 	Expect(err).NotTo(HaveOccurred())
 
-	roleStatus, body, err := tool.KeycloakAdminRequest(ctx, http.MethodGet, "/roles/tenant-admin", nil)
-	Expect(err).NotTo(HaveOccurred())
-	if roleStatus == http.StatusNotFound {
-		code, _, e := tool.KeycloakAdminRequest(ctx, http.MethodPost, "/roles", map[string]any{"name": "tenant-admin"})
-		Expect(e).NotTo(HaveOccurred())
-		Expect(code).To(Equal(http.StatusCreated))
-		roleStatus, body, err = tool.KeycloakAdminRequest(ctx, http.MethodGet, "/roles/tenant-admin", nil)
-		Expect(err).NotTo(HaveOccurred())
-	}
-	Expect(roleStatus).To(Equal(http.StatusOK))
-	var role map[string]any
-	Expect(json.Unmarshal(body, &role)).To(Succeed())
-	code, _, err := tool.KeycloakAdminRequest(ctx, http.MethodPost, "/users/"+tenant.GetObject().GetStatus().GetBreakGlassUserId()+"/role-mappings/realm", []map[string]any{role})
-	Expect(err).NotTo(HaveOccurred())
-	Expect(code).To(Equal(http.StatusNoContent))
+	grantTenantAdminRealmRole(ctx, tenant.GetObject().GetStatus().GetBreakGlassUserId())
 
 	_, token := loginAsBreakGlass(ctx, tenants, name, id)
 	publicConn, err := tool.makeGrpcConn(externalServiceAddr, token)
@@ -719,7 +727,11 @@ func createCatalogItemBareMetalInstanceTemplateFixture(ctx context.Context, defa
 	return id
 }
 
-func createCatalogItemBareMetalInstanceTypeFixture(ctx context.Context, _ string) string {
+func createCatalogItemBareMetalInstanceTypeFixture(ctx context.Context, _ string, architecture ...string) string {
+	cpu := "amd64"
+	if len(architecture) > 0 {
+		cpu = architecture[0]
+	}
 	GinkgoHelper()
 	client := privatev1.NewBareMetalInstanceTypesClient(tool.InternalView().AdminConn())
 	response, err := client.Create(ctx, privatev1.BareMetalInstanceTypesCreateRequest_builder{
@@ -727,7 +739,7 @@ func createCatalogItemBareMetalInstanceTypeFixture(ctx context.Context, _ string
 			Metadata: catalogItemFixtureMetadata(auth.SharedTenant, ""),
 			Spec: privatev1.BareMetalInstanceTypeSpec_builder{
 				Hardware: privatev1.BareMetalHardwareSpec_builder{
-					Cpu:    privatev1.BareMetalCPUSpec_builder{Cores: 4, Architecture: "amd64", ThreadsPerCore: 2}.Build(),
+					Cpu:    privatev1.BareMetalCPUSpec_builder{Cores: 4, Architecture: cpu, ThreadsPerCore: 2}.Build(),
 					Memory: privatev1.BareMetalMemorySpec_builder{TotalGb: 16}.Build(),
 					NetworkPorts: []*privatev1.BareMetalNetworkPortSpec{
 						privatev1.BareMetalNetworkPortSpec_builder{

@@ -88,7 +88,7 @@ target Hub cluster.
 | **Container Registry Access** | `registry.redhat.io` and `quay.io` | Verify credentials and pull secrets are valid in the target cluster namespace. |
 | **Network / DNS** | Ingress route configured for OSAC services | Required for external access to fulfillment API and AAP UI. |
 | **Authentication / IDM** | Organization Identity Provider (e.g., Keycloak, LDAP, RH-SSO) | Used for tenant and user identity mapping. |
-| **Kafka** | Broker access for fulfillment events, even when metering is disabled | See [external Kafka configuration](../docs/guides/installation/kafka-configuration.md) for connection settings, credentials, ACLs, TLS trust, and a Strimzi example. |
+| **Kafka** | Broker access for fulfillment and metering events | See [external Kafka configuration](../docs/guides/installation/kafka-configuration.md) for connection settings, credentials, ACLs, TLS trust, and a Strimzi example. |
 | **Storage** | Dynamic storage class available (e.g., `ocs-storagecluster-cephfs`, `lvms-storage`) | Required for persistence of operator and AAP components. |
 | **Permissions** | Cluster-admin access to deploy operators and create CRDs | Limited access users can only deploy into namespaces configured by the admin. |
 | **License Files** | `license.zip` (AAP subscription) | Must be placed in your values directory (e.g., `values/<env>/license.zip`). |
@@ -182,12 +182,10 @@ operator pod instead of leaving the previous one running. If you set
 leaves the Deployment unchanged, so the previous pod keeps running. The flag is
 rejected for `PLATFORM=openshift`, where a localhost image cannot be pulled.
 
-To preview the full Kind install and enable the CSI driver without making cluster
-changes:
+To preview the full Kind install without making cluster changes:
 
 ```bash
-make install PLATFORM=kind PROFILE=dev NS=osac DRY_RUN=1 \
-  EXTRA_HELM_ARGS='--set csiDriver.enabled=true'
+make install PLATFORM=kind PROFILE=dev NS=osac DRY_RUN=1
 ```
 
 For OpenShift, provide the cluster-specific values explicitly because dry-run
@@ -195,8 +193,7 @@ mode does not query the cluster:
 
 ```bash
 make install PLATFORM=openshift PROFILE=vmaas-ci NS=osac DRY_RUN=1 \
-  DRY_RUN_CLUSTER_DOMAIN=apps.example.com DRY_RUN_OCP_VERSION=4.20 \
-  EXTRA_HELM_ARGS='--set csiDriver.enabled=true'
+  DRY_RUN_CLUSTER_DOMAIN=apps.example.com DRY_RUN_OCP_VERSION=4.20
 ```
 
 `DRY_RUN=1` routes the composite target through `helm template` for every
